@@ -42,10 +42,8 @@ struct ThreadTask
 	void Join()
 	{
 		std::unique_lock<std::mutex> lock(mtx);
-		if (queue.size() > 0)
-		{
-			complete.wait(lock);
-		}
+		// mxl-replay: a predicate, so a spurious wakeup does not return early.
+		complete.wait(lock, [this] { return queue.empty(); });
 	}
 
 	void TaskLoop()
@@ -56,7 +54,10 @@ struct ThreadTask
 			if (queue.size() == 0)
 			{
 				complete.notify_all();
-				cv.wait(lock);
+				// mxl-replay: a predicate. Without it a Destroy() that set running = false between the
+				// loop's check and this wait was never seen, and its join() hung (a pool destroyed
+				// right after it was created, as VMX_SetThreads after VMX_Create does).
+				cv.wait(lock, [this] { return !running || !queue.empty(); });
 			}
 			if (!running) break;
 			std::function<void()> func = NULL;
