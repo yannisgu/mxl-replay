@@ -77,6 +77,9 @@ if(REPLAY_WITH_VMX AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     target_link_libraries(vmx PUBLIC Threads::Threads)
     target_link_libraries(replay-core PUBLIC vmx)
     target_compile_definitions(replay-core PUBLIC REPLAY_WITH_VMX=1)
+    # libvmx alone, without the replay's conversions (docs/benchmarks).
+    add_executable(vmx-probe tests/bench/vmx_probe.cpp)
+    target_link_libraries(vmx-probe PRIVATE vmx)
 endif()
 
 # One binary: nvcc + nvJPEG when the toolkit is installed, CPU fallback when it is not.
@@ -113,6 +116,10 @@ if(REPLAY_BUILD_TESTS)
     target_compile_options(unit-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
     add_test(NAME unit-tests COMMAND unit-tests)
 endif()
+
+# Encode and decode speed, size and PSNR of the picture codecs on real pictures (docs/benchmarks).
+add_executable(mxl-replay-codec-bench tests/bench/codec_bench.cpp)
+target_link_libraries(mxl-replay-codec-bench PRIVATE replay-core)
 
 find_package(mxl CONFIG QUIET)
 set(REPLAY_UI_SOURCE "")

@@ -73,3 +73,47 @@ Same host, GPU and cameras as above; storage the OS disk. Image built from this 
 Recorded counts above 50 per second are cameras catching up on grains still in the input ring. The CPU rises because every camera is now actually recorded (200 encodes per second instead of about 75) and the nvJPEG decoder runs its Huffman stage on the CPU on this GPU.
 
 Result: four 1080p50 cameras record without drops while four channels interpolate, and the limit is now the GPU itself: dense optical flow (`dis-cuda` `balanced`) for one new frame pair per output pair at 0.5× keeps the GA107 at 97–98 % with four channels. Eight channels on this GPU take recording below full rate. A larger GPU (A4000, L4) is expected to scale with its SM count; that run is still open, as are 2160p50, OFA and the Futatabi comparison.
+
+## Lab run 2026-11-24: CPU codecs, JPEG and VMX
+
+VMX, the codec of Open Media Transport, as the stored picture codec (`REPLAY_CODEC=vmx`, README "VMX"), against libjpeg-turbo, on a host without a GPU. The host was the lmjob build VM: 16 vCPU AMD EPYC (Genoa), Debian sid, GCC. It has no libmxl, so `REPLAY_SYNTHETIC_FILE` feeds the cameras. The pictures are the first 100 of three 1080p50 sequences from SVT's test set (Xiph's derf collection), 4:2:0 8-bit sources converted to v210. `crowd_run` and `park_joy` are hard to code, and `old_town_cross` is easy. `tests/bench/lab.sh` repeats the run.
+
+### The codecs, one thread
+
+`mxl-replay-codec-bench` encodes each picture from v210 and decodes it back to v210 the way the replay records and plays (`encodePictureV210`, `decodePictureToV210`), so the v210 conversions count. It also times the UI preview (`decodePicturePreview`, at least 384 wide) and measures the size and the PSNR of the 10-bit samples against the source. Times are milliseconds per 1080 picture on one thread, from the second of two passes. For `crowd_run`:
+
+| Codec | Encode ms | Decode ms | Preview ms | KB/picture | GB/h at 50p | PSNR Y dB | PSNR C dB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| JPEG q92 (the default) | 8.14 | 10.64 | 7.97 | 867 | 160 | 41.10 | 42.24 |
+| JPEG q80 | 6.79 | 7.82 | 5.43 | 505 | 93 | 36.79 | 39.10 |
+| VMX `hq` (the default) | 4.65 | 5.71 | 5.41 | 570 | 105 | 36.54 | 40.75 |
+| VMX `sq` | 4.37 | 4.00 | 3.78 | 285 | 53 | 31.97 | 37.43 |
+| VMX `omt_sq` | 4.29 | 4.69 | 4.54 | 421 | 78 | 34.04 | 38.87 |
+| VMX quality 95 | 5.72 | 7.49 | 7.40 | 896 | 165 | 40.60 | 44.13 |
+| VMX quality 98 | 7.44 | 10.91 | 10.94 | 1484 | 274 | 46.87 | 49.65 |
+
+`park_joy` gave the same result (JPEG q92 8.44 ms to encode and 10.88 to decode, 887 KB, 40.97 dB; VMX `hq` 4.75 and 5.79 ms, 551 KB, 35.20 dB; VMX quality 95 5.64 and 7.73 ms, 909 KB, 40.64 dB). On `old_town_cross` JPEG shrinks with the content (q92 695 KB, q80 360 KB) and VMX's profiles don't (`hq` 547 KB, 38.43 dB), because their rate control aims at a size per frame. Quality 90 gives 375 KB at 36.86 dB there.
+
+- At the same quality as the default JPEG (VMX quality 95 against JPEG q92, with luma 0.4 dB lower, chroma 2 dB higher and the same size), VMX encodes in 30 % less time and decodes in 30 % less.
+- At the defaults (`hq` against q92) it takes 43 % less time to encode and 46 % less to decode. Its pictures are a third smaller and 4.5 dB lower in luma. `hq` is close to JPEG q80 in quality and 13 % larger.
+- The PSNR is measured against 8-bit sources, so VMX's 10 bits don't show (JPEG rounds to 8 bits and VMX doesn't). On 10-bit cameras the gap in VMX's favour would be larger.
+- libvmx alone (`tests/bench/vmx_probe.cpp`, no conversions) takes 3.4 ms to encode and 3.9 ms to decode a 10-bit `crowd_run` picture at its default size, and 3.0 and 3.4 ms in 8-bit UYVY. GCC and clang builds are equally fast. The v210 conversions add about 1.2 ms to an encode and 1.8 ms to a decode.
+- Two defects of libvmx had to be fixed first (`third_party/libvmx/README.md`). With one thread it still coded on a worker thread, which made a picture take 4–10 ms on this VM. Its thread pool could also hang in `join()` when destroyed right after it was created.
+
+### The replay
+
+`tests/bench/replay_bench.py` runs the whole process. Every camera records the three sequences, each from another place, and channel n plays camera n from 10 s back. It measures 30 s after 18 s of recording. There were two rounds, and in each the codecs ran one after the other for every case. The codec columns give the process's CPU in cores. The last column says whether every camera recorded 50 pictures a second, every channel output 50 grains a second, and no channel resynced; the render time per output grain comes from `playout_seconds{stage="render"}`. VMX q95 is `REPLAY_VMX_QUALITY=95`, measured in the second round only.
+
+| Cameras, channels, playout | JPEG q92: CPU cores | VMX `hq` | VMX q95 | Keeps up |
+| --- | --- | --- | --- | --- |
+| 4, 2, 1× repeat | 3.07, 3.18 | 3.03, 3.07 | 3.04 | yes, every codec |
+| 8, 4, 1× repeat | 6.52, 6.40 | 6.52, 6.80 | 6.38 | yes, every codec |
+| 12, 4, 1× repeat | 8.25, 8.10 | 7.42, 7.35 | 7.42 | yes, every codec |
+| 12, 8, 1× repeat | 11.08, 10.68 | 8.48, 8.38 | 9.40 | almost. Every codec records 49.6–49.9 pictures a second per camera, with 2–8 resyncs in 30 s |
+| 4, 4, 0.5× blend | 5.64, 5.58 | 5.25, 5.58 | 5.52 | no. Rendering takes 24–26 ms a grain against 20 ms (38–40 output grains a second, 400–460 resyncs). VMX `hq` kept up in round 2 (15.6 ms) but not in round 1 |
+
+- With few cameras the codec is a small part of the process, and the CPU is the same for both. From 12 cameras on, VMX saves 9 % (4 channels) to 12–21 % (8 channels) of the process's CPU. That is less than the codec's own 30–45 %, because the rest of the process (v210 copies, the rings and their writes, playout, the feeders) costs the same with either codec.
+- The codec doesn't limit blending at 0.5× on the CPU. The blend decodes two pictures into 16-bit frames, blends them and packs the result on the output thread, which takes about 25 ms a grain with either codec on this VM. This host needs a GPU (JPEG only) or a faster CPU blend for it. VMX decodes faster, which is why `hq` kept up once.
+- At 1×, render time per grain is 0.2–1.7 ms higher with VMX. The cause is not known yet, and it stays far below the 20 ms period.
+
+Not measured: a host with a GPU (VMX uses none of it: recording and playout stay on the CPU and interpolation is not available, see README "VMX"), 2160p, HFR, and VMX's 10-bit gain on a 10-bit source.

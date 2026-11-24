@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `REPLAY_CODEC=vmx` stores pictures as VMX, the intra-frame codec of Open Media Transport, instead of JPEG. The library is libvmx (MIT), vendored in `third_party/libvmx`. It codes 10-bit 4:2:2 from v210 on the CPU and needs AVX2 and BMI2. The new settings are `REPLAY_VMX_PROFILE` (default `hq`), `REPLAY_VMX_QUALITY` (a fixed quality instead of the profile's rate control) and `REPLAY_VMX_THREADS`. The decoder picks the codec from each picture, so uploads (still JPEG) and frames recorded before a change still play. With VMX the GPU paths are not used (README "VMX"). The status reports `codec`.
+- `REPLAY_SYNTHETIC_FILE`. With `REPLAY_SYNTHETIC`, every camera records raw v210 pictures from a file, each on its own thread like an MXL reader. This allows measurements on real pictures without MXL.
+- New benchmarks. `mxl-replay-codec-bench` measures encode, decode and preview time, size and PSNR per codec on real pictures. `tests/bench/vmx_probe.cpp` times libvmx alone. `tests/bench/replay_bench.py` measures the whole replay under load, and `tests/bench/lab.sh` runs them all. Results are in `docs/benchmarks/README.md` ("CPU codecs"). At JPEG q92's quality, VMX codes a 1080p picture in 30 % less time. On the first lab VM the whole process saved 9–21 % of its CPU from 12 cameras on.
+- Two fixes in the vendored libvmx. With one thread it now codes on the calling thread. Its worker thread had made a picture take 4–10 ms instead of 3–4 on a VM. Its thread pool no longer hangs when destroyed right after it was created.
+- New tests cover the VMX settings, a 10-bit round trip at 1920, 1926 and 64 pixels wide (v210 directly and through 16-bit frames, and previews), JPEG and VMX in one ring, and damaged pictures.
+
 ## 1.8.7 (2026-11-10)
 
 - A grain's audio is written to MXL before its picture is rendered. Until now each channel rendered the picture first (GPU decode, interpolation, mix; on a busy shared GPU 10 ms typical, up to 20 ms at 50p), then wrote video, ANC and only then the grain's audio. The audio needs only the position, speed and transition state, so `Engine::render` now makes it first and hands it to the MXL writer at once (`MxlBridge::publishAudio`), then renders the picture as before. Downstream (an audio mixer reading the flow, a fabrics sender) gets each grain's audio about one render time earlier. A live channel still waits briefly for its newest recorded frame before both. The audio is still one write of the grain's samples (960 at 50p). `playout_seconds{stage="render"}` now includes the audio write; `publish` is the picture and ANC.
