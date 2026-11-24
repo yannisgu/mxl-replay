@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (fork: VMX)
+
+- `REPLAY_CODEC=vmx` stores pictures as VMX, the intra-frame codec of Open Media Transport (libvmx, MIT, vendored in `third_party/libvmx`), instead of JPEG: 10-bit 4:2:2 from v210, on the CPU (AVX2 and BMI2 needed). `REPLAY_VMX_PROFILE` (`hq` default), `REPLAY_VMX_QUALITY` (a fixed quality instead of the profile's rate control), `REPLAY_VMX_THREADS`. Decoding picks the codec from each picture, so uploads (still JPEG) and frames recorded before a change play. With VMX the GPU paths are not used (README "VMX"). The status has `codec`.
+- `REPLAY_SYNTHETIC_FILE`: with `REPLAY_SYNTHETIC`, every camera records raw v210 pictures from a file, on its own thread like an MXL reader, for measurements on real pictures without MXL.
+- Benchmarks: `mxl-replay-codec-bench` (encode, decode, preview time, size and PSNR per codec on real pictures), `tests/bench/vmx_probe.cpp` (libvmx alone), `tests/bench/replay_bench.py` (the whole replay under load) and `tests/bench/lab.sh`. Results in `docs/benchmarks/README.md` ("CPU codecs"): at JPEG q92's quality VMX codes a 1080p picture in 30 % less time; the process saves 9–21 % of its CPU from 12 cameras on.
+- Two fixes in the vendored libvmx: one thread codes on the calling thread (its worker thread made a picture 4–10 ms instead of 3–4 on a VM), and its thread pool no longer hangs when destroyed right after it was made.
+- New tests: the VMX settings, a 10-bit round trip at 1920, 1926 and 64 wide (v210 straight and through 16-bit frames, previews), JPEG and VMX side by side, damaged pictures.
+
 ## 1.8.7 (2026-11-10)
 
 - A grain's audio is written to MXL before its picture is rendered. Until now each channel rendered the picture first (GPU decode, interpolation, mix; on a busy shared GPU 10 ms typical, up to 20 ms at 50p), then wrote video, ANC and only then the grain's audio. The audio needs only the position, speed and transition state, so `Engine::render` now makes it first and hands it to the MXL writer at once (`MxlBridge::publishAudio`), then renders the picture as before. Downstream (an audio mixer reading the flow, a fabrics sender) gets each grain's audio about one render time earlier. A live channel still waits briefly for its newest recorded frame before both. The audio is still one write of the grain's samples (960 at 50p). `playout_seconds{stage="render"}` now includes the audio write; `publish` is the picture and ANC.
