@@ -912,6 +912,8 @@ inline void VMX_DecodePlanes(VMX_INSTANCE* instance)
 	int numThreads = instance->Threads;
 	int totalSlices = instance->SliceCount;
 	int slicesPerThread = totalSlices / numThreads;
+	// mxl-replay: one thread works on the calling thread (no hand-off to a worker on another core).
+	if (numThreads == 1) { VMX_DecodeSlices(instance, 0, totalSlices); return; }
 	int count = slicesPerThread;
 	for (int i = 0; i < numThreads; i++)
 	{
@@ -1677,6 +1679,8 @@ inline void VMX_EncodePlanes(VMX_INSTANCE* instance)
 	int numThreads = instance->Threads;
 	int totalSlices = instance->SliceCount;
 	int slicesPerThread = totalSlices / numThreads;
+	// mxl-replay: one thread works on the calling thread (no hand-off to a worker on another core).
+	if (numThreads == 1) { VMX_EncodeSlices(instance, 0, totalSlices); return; }
 	int count = slicesPerThread;
 	for (int i = 0; i < numThreads; i++)
 	{
