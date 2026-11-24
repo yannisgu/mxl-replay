@@ -9,6 +9,8 @@
 - `mxl-replay-encode-scale` measures the encode cost with N cameras at once, paced at 50/s or flat out. `vmx-pace` times one encode after no gap, a busy-wait or a sleep. The camera feeders, output threads and decode workers now have names (`rp-cam-N`, `rp-out-N`, `rp-ahead`), so `/proc` can split the process's CPU by thread.
 - On a VM with dedicated cores, 8 cameras and 2 channels take 29 % less CPU with VMX `hq` and 18 % less at JPEG's quality (`docs/benchmarks/README.md`, "dedicated cores"). The first lab VM had shared vCPUs, which slow down a thread that sleeps between pictures and hid that saving.
 - New tests cover the VMX settings, a 10-bit round trip at 1920, 1926 and 64 pixels wide (v210 directly and through 16-bit frames, and previews), JPEG and VMX in one ring, and damaged pictures.
+- The CPU slow motion and mix now blend in v210. On a host without a GPU, a 0.5× blend spent 23.5 ms of the output thread per blended grain, longer than a 50p grain lasts. It decoded two JPEGs into 16-bit frames, blended them and packed the result back, and 4 channels on a 16-vCPU EPYC VM fell behind. Now the decode worker also decodes frame B, each frame once, straight to v210. The output thread blends the two v210 pictures in place (`blendV210`, with AVX2 and SSE4.1 versions picked at run time) in about 1 ms. 4 cameras and 8 slow-motion channels keep up, with about a quarter less CPU. The result is bit-exact with the 16-bit blend (unit tests). Measurements are in `docs/benchmarks/README.md` ("the CPU blend in v210").
+- `mxl-replay-blend-bench` times a blended grain stage by stage, before and after.
 
 ## 1.8.7 (2026-11-10)
 
