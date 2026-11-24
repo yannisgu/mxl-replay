@@ -3,6 +3,7 @@
 #include "flow/dis.hpp"
 #include "media/audio.hpp"
 #include "media/format.hpp"
+#include "media/picture.hpp"
 #include "playout/scheduler.hpp"
 #include "playout/shotbox.hpp"
 
@@ -90,6 +91,10 @@ struct Config
     std::string storageDir = "/data/replay";
     double bufferHours = 2;
     int jpegQuality = 92;
+    // The stored picture codec (REPLAY_CODEC: jpeg or vmx) and VMX's settings (REPLAY_VMX_PROFILE,
+    // REPLAY_VMX_QUALITY, REPLAY_VMX_THREADS).
+    PictureCodec codec = PictureCodec::Jpeg;
+    VmxSettings vmx;
     // The largest upload body accepted, in MB (REPLAY_UPLOAD_MAX_MB; 0: no limit).
     int uploadMaxMb = 8192;
     int protectMaxPct = 50;
@@ -107,6 +112,9 @@ struct Config
     double storageMinMbps = 100;
     bool odirect = false;
     bool synthetic = false;
+    // REPLAY_SYNTHETIC_FILE: raw v210 pictures of the house raster, looped as every camera's input
+    // (each camera from another picture), for measurements without MXL. Empty: flat test fills.
+    std::string syntheticFile;
     std::string scanPath = "/Volumes/mxl";
     std::string outputDomainDir;
     std::string outputDomainId;

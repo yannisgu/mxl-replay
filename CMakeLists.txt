@@ -25,6 +25,8 @@ add_library(replay-core STATIC
     src/media/format.cpp
     src/media/v210.cpp
     src/media/jpeg.cpp
+    src/media/picture.cpp
+    src/media/vmx.cpp
     src/media/audio.cpp
     src/media/anc.cpp
     src/media/scale.cpp
@@ -60,6 +62,23 @@ target_include_directories(replay-core PUBLIC src third_party)
 target_link_libraries(replay-core PUBLIC Threads::Threads PkgConfig::JPEG PkgConfig::SQLITE PkgConfig::AV ${CMAKE_DL_LIBS})
 target_compile_options(replay-core PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 
+# VMX (Open Media Transport's codec, third_party/libvmx) as the stored picture codec, REPLAY_CODEC=vmx.
+# Like upstream's Linux build, it is compiled for AVX2 + BMI; vmxAvailable() checks the CPU at run time.
+option(REPLAY_WITH_VMX "Build the VMX picture codec (x86-64)" ON)
+if(REPLAY_WITH_VMX AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    add_library(vmx STATIC
+        third_party/libvmx/src/vmxcodec.cpp
+        third_party/libvmx/src/vmxcodec_x86.cpp
+        third_party/libvmx/src/vmxcodec_avx2.cpp
+    )
+    target_include_directories(vmx PUBLIC third_party/libvmx/src)
+    set_target_properties(vmx PROPERTIES CXX_STANDARD 17 POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(vmx PRIVATE -O3 -mavx2 -mbmi -mlzcnt -w -include ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvmx/vmx_gcc.h)
+    target_link_libraries(vmx PUBLIC Threads::Threads)
+    target_link_libraries(replay-core PUBLIC vmx)
+    target_compile_definitions(replay-core PUBLIC REPLAY_WITH_VMX=1)
+endif()
+
 # One binary: nvcc + nvJPEG when the toolkit is installed, CPU fallback when it is not.
 # sm_75 (Turing), sm_86 (A4000), sm_89 (L4). The runtime image does not ship a
 # driver; the NVIDIA container toolkit injects libcuda at start.
@@ -88,6 +107,7 @@ if(REPLAY_BUILD_TESTS)
         tests/unit/test_upload_stream.cpp
         tests/unit/test_readahead.cpp
         tests/unit/test_decodeahead.cpp
+        tests/unit/test_vmx.cpp
     )
     target_link_libraries(unit-tests PRIVATE replay-core)
     target_compile_options(unit-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
