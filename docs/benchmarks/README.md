@@ -117,3 +117,49 @@ VMX, the codec of Open Media Transport, as the stored picture codec (`REPLAY_COD
 - Render time per grain at 1× is 0.2–1.7 ms higher with VMX. Not investigated; it stays far below the 20 ms period.
 
 Not measured: a host with a GPU (VMX uses none of it: recording and playout stay on the CPU and interpolation is not available, see README "VMX"), 2160p, HFR, and VMX's 10-bit gain on a 10-bit source.
+
+## Lab run 2026-11-24: the CPU blend in v210
+
+Where a CPU slow motion lost its time, and the blend that works in v210 instead (IMPLEMENTATION_PLAN.md deviation 49). Same host as above (16 vCPU EPYC, no GPU).
+
+### Where the time went
+
+`mxl-replay-blend-bench` on 40 pictures of `crowd_run`: one blended grain of a 0.5× slow motion (frames k and k+1 at 50 %), stage by stage, ms on one thread.
+
+| Stage | JPEG q92 | VMX `hq` | VMX q95 |
+| --- | --- | --- | --- |
+| **Before**, all on the output thread | | | |
+| decode A into a 16-bit frame | 9.54 | 5.93 | 7.94 |
+| decode B into a 16-bit frame | 9.59 | 5.85 | 7.77 |
+| blend the 16-bit frames (`blendInto`) | 1.68 | 1.69 | 1.70 |
+| pack to v210 (`packV210`) | 2.34 | 2.34 | 2.42 |
+| copy to the channel's last grain | 0.32 | 0.40 | 0.38 |
+| **output thread** | **23.47** | **16.21** | **20.20** |
+| **After** | | | |
+| the worker decodes B to v210 | 9.70 | 5.86 | 7.94 |
+| B out of the worker's slot (copy) | 0.31 | 0.48 | 0.41 |
+| blend A and B into the grain (`blendV210`) | 0.49 | 0.62 | 0.56 |
+| copy to the channel's last grain | 0.28 | 0.36 | 0.34 |
+| **output thread** | **1.08** | **1.46** | **1.31** |
+| **CPU in all** | **10.78** | **7.33** | **9.24** |
+
+- The old path needed more than a 50p grain (20 ms) on the output thread with JPEG, every blended grain. 82 % of it was the two decodes, and each frame was decoded twice: as B of one grain and again as the exact frame of the next.
+- Unpacking into 16-bit frames and packing back cost another 4 ms (the blend itself 1.7 ms); v210 needs neither.
+- Now each frame is decoded once, on the decode worker, straight into v210; the output thread copies it out of the slot and blends (`blendV210`: 0.5 ms with AVX2, 2.0 ms in the baseline x86-64 build, which cannot multiply 32-bit lanes; hence `target_clones`). In all, a blended grain costs less than half the CPU, and the output thread 1–1.5 ms.
+- What remains is the decode: libjpeg-turbo's 9.7 ms, VMX's 5.9 ms. Decoding straight to v210 costs the same as decoding to 16 bits (4.4–4.6 ms on a smaller test picture, measured apart); the faster line packing (`line8ToV210` without its per-pixel branch) made no difference.
+
+### The replay
+
+`replay_bench.py`, 25 s per case, the fork before this change (`d5ea759`) and after it, in one job. Channels 5–8 play cameras 1–4 again.
+
+| Case | Codec | Before: output grains/s, resyncs, render ms, CPU | After |
+| --- | --- | --- | --- |
+| 4 cameras, 4 channels, 0.5× blend | JPEG | 38.9, 371, 25.5 ms, 5.60 cores | 50.0, 0, 3.4 ms, 4.02 cores |
+| | VMX `hq` | 41.0, 300, 23.8 ms, 5.29 | 50.0, 0, 3.8 ms, 4.08 |
+| 4 cameras, 8 channels, 0.5× blend | JPEG | 50.0, 3, 17.6 ms, 9.37 | 50.0, 0, 4.4 ms, 6.60 |
+| | VMX `hq` | 25.1, 1596, 39.5 ms, 6.22 (cameras recorded 37/s) | 50.0, 0, 5.0 ms, 6.39 |
+| 12 cameras, 8 channels, 1× repeat | JPEG | 49.9, 6, 5.4 ms, 10.56 | 49.8, 8, 5.9 ms, 10.35 |
+| | VMX `hq` | 49.9, 7, 6.4 ms, 8.40 | 49.9, 8, 6.8 ms, 8.56 |
+
+- Slow motion on the CPU now keeps up with 8 channels on 4 cameras, with either codec, and takes about a quarter less CPU; before, 4 channels fell behind (the 8-channel JPEG run that kept up had 17.6 ms renders, close to the limit).
+- Playout at 1× is unchanged (the same path; the few resyncs at 12 cameras and 8 channels are there before and after).
