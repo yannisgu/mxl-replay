@@ -47,6 +47,16 @@ Uploads are logged (1.8.3): `upload_started` (`name`, `bytes`, `content_type`) w
 
 The container image is the GPU build. It still starts with no GPU, which is enough for recording and clip playback (`repeat` / `blend`): on 2× Xeon Gold 6136 without a GPU, 4 cameras at 1080p50 plus 4 channels blending at 0.5× take about 6 cores (libjpeg-turbo). Interpolation and nvJPEG run when the NVIDIA container toolkit injects a device (`docker run --gpus all` or the Kubernetes `nvidia` runtime). Set `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` (the image already does). The process runs as uid/gid 1000. One GPU is shared by every channel. The device holds three 4:2:2 frames and up to nine flow pairs: about 180 MB resident at 1080p and about 700 MB at 2160p, before nvJPEG's own workspace. A 4 GB GPU covers that path. These figures are the sizes of the allocations in `src/flow/dis_cuda.cu`, not a profile on an A4000 or an L4.
 
+## VMX
+
+`REPLAY_CODEC=vmx` stores pictures as [VMX](https://www.openmediatransport.org/), the intra-frame codec of Open Media Transport, instead of JPEG. The library is libvmx (MIT), vendored in `third_party/libvmx`. VMX codes the input's 10-bit 4:2:2 (v210, converted to P216) with no 8-bit step. It runs only on the CPU and needs AVX2 and BMI2, which every Haswell and Zen CPU has. Without them the process exits with code 78 at start. Each picture starts with a 12-byte header, so one buffer can hold both codecs. Uploads stay JPEG, and frames recorded before a change of `REPLAY_CODEC` still play.
+
+VMX pictures don't use a GPU. nvJPEG decodes only JPEG, so recording, playout and previews run on the CPU, and `interpolate` falls back to blend unless `REPLAY_ALLOW_CPU_INTERP` is set.
+
+At the default JPEG's quality (`REPLAY_VMX_QUALITY=95` against `REPLAY_JPEG_QUALITY=92`), VMX encodes and decodes a 1080p picture in about 30 % less time than libjpeg-turbo, at the same size. The `hq` default takes about 45 % less time and makes smaller pictures, close to JPEG q80 in quality. The whole replay saves less: 9–21 % of its CPU from 12 cameras on, and nothing measurable with 4 (`docs/benchmarks/README.md`, "CPU codecs").
+
+libvmx's profiles aim at a fixed size per frame, whatever the content. `hq` makes about 570 KB per 1080 picture, about 105 GB per hour per camera at 50p, and `sq` half of that. `REPLAY_VMX_QUALITY` fixes the quality instead, and the size then follows the content (98 gives about 1.5 MB per frame on busy pictures). The free-space check uses the profile's largest frame size.
+
 ## Build
 
 C++20, CMake ≥ 3.24, Ninja, GCC ≥ 12 or Clang ≥ 16.
@@ -85,6 +95,10 @@ Process state (the SQLite catalog, imported settings, and IS-05 routes) lives in
 | `REPLAY_STORAGE_DIR` | `/data/replay` |
 | `REPLAY_BUFFER_HOURS` | 2 |
 | `REPLAY_JPEG_QUALITY` | 92 |
+| `REPLAY_CODEC` | `jpeg`. Set `vmx` for VMX, the codec of Open Media Transport, 10-bit, on the CPU (see "VMX" below) |
+| `REPLAY_VMX_PROFILE` | `hq`. Also `sq`, `lq`, `omt_hq`, `omt_sq` and `omt_lq`, each with libvmx's rate control for that profile |
+| `REPLAY_VMX_QUALITY` | 0 uses the profile's rate control. 1–98 sets a fixed quality |
+| `REPLAY_VMX_THREADS` | 1. libvmx's threads per picture |
 | `REPLAY_UPLOAD_MAX_MB` | 8192 (the largest upload body; 0: no limit) |
 | `REPLAY_PROTECT_MAX_PCT` | 50 |
 | `REPLAY_FLOW_MODULE` | `dis-cuda` (`ofa` is accepted and still uses the DIS path) |
@@ -100,6 +114,7 @@ Process state (the SQLite catalog, imported settings, and IS-05 routes) lives in
 | `REPLAY_STORAGE_MIN_MBPS` | 100 |
 | `REPLAY_ODIRECT` | false (ignored since 1.1.0, see the implementation plan) |
 | `REPLAY_SYNTHETIC` | false |
+| `REPLAY_SYNTHETIC_FILE` | empty. With `REPLAY_SYNTHETIC`, every camera loops the raw v210 pictures of the house raster in this file |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` |
 | `MXL_OUTPUT_DOMAIN_DIR` | `<scan>/replay-<short id>` |
 | `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 of `mxl-replay/<NMOS_SEED>/domain` |
@@ -185,7 +200,7 @@ Each grain's time is a histogram, `playout_seconds{channel,stage}` (`render`: th
 
 The next 2 grains' stored pictures are decoded ahead (1.8.5): a worker per channel, with its own GPU stream and nvJPEG state, decodes the frames the position and speed say come next (frame A, and B of a grain between two frames) into 10 slots (a repeat of the picture before it is skipped: the output thread does not decode it either), and the output thread copies the decoded picture instead of decoding it. A slower decode on a busy GPU then overlaps the grains before it. Since 1.8.6 also the clip after OUT (the next playlist entry, auto-advance or cued, the idle playlist's next or first entry, a loop back to IN: its first 6 frames at its speed, from 12 grains before the playlist's longest transition starts), both entries of a mix on the GPU (the incoming one 6 grains ahead: a mix needs two new pictures a grain, and the frames decoded before it keep the worker ahead), and a cued shot's frame and the first frame of its play at the cue. The output thread waits at most 5 ms for a frame the worker is still decoding, and decodes a frame itself after a jump, a speed or angle change and close to live (the next frame is recorded just as it is needed). `decode_ahead_frames_total{channel,result}` counts each frame the output thread needed: `hit` (decoded ahead), `late` (still decoding after the wait), `miss` (decoded on the output thread); `decode_ahead_wait_seconds{channel}` is the time it waited. It costs about 70 MiB of GPU memory per channel (10 slots of a 1080 picture, about 4 MB each, and the worker's nvJPEG state). Without a GPU the worker decodes single frames into v210 (not the two frames of a blend).
 
-`REPLAY_SYNTHETIC=true` feeds a moving test raster into the recorder so the UI and the integration test can run without other MXL flows.
+`REPLAY_SYNTHETIC=true` feeds a moving test raster into the recorder so the UI and the integration test can run without other MXL flows. With `REPLAY_SYNTHETIC_FILE` set to a file of raw v210 pictures of the house raster (made with `ffmpeg … -c:v v210 -f rawvideo`), every camera records those pictures instead. Each camera starts at another place in the file and runs on its own thread, like an MXL reader. This gives real pictures for measurements without MXL (`tests/bench/replay_bench.py`).
 
 ## Previews
 

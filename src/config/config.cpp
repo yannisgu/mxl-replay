@@ -284,10 +284,11 @@ std::map<std::string, std::vector<std::string>> parseNmosTags(std::string const&
 
 std::vector<std::string> configKeys()
 {
-    return {"HOST_ID", "REPLAY_FORMAT", "REPLAY_INPUTS", "REPLAY_CHANNELS", "REPLAY_STORAGE_DIR", "REPLAY_BUFFER_HOURS", "REPLAY_JPEG_QUALITY", "REPLAY_UPLOAD_MAX_MB",
+    return {"HOST_ID", "REPLAY_FORMAT", "REPLAY_INPUTS", "REPLAY_CHANNELS", "REPLAY_STORAGE_DIR", "REPLAY_BUFFER_HOURS", "REPLAY_JPEG_QUALITY", "REPLAY_CODEC", "REPLAY_VMX_PROFILE",
+        "REPLAY_VMX_QUALITY", "REPLAY_VMX_THREADS", "REPLAY_UPLOAD_MAX_MB",
         "REPLAY_PROTECT_MAX_PCT", "REPLAY_FLOW_MODULE", "REPLAY_INTERP_PRESET", "REPLAY_SLOWMO_AUDIO", "REPLAY_RAMP_FRAMES", "REPLAY_HFR_SNAP",
         "REPLAY_SEGMENT_SECONDS", "REPLAY_LIVE_DELAY_FRAMES", "REPLAY_PLAY_ON_FIRST_CLICK", "REPLAY_ALLOW_CPU_INTERP", "REPLAY_STORAGE_MIN_MBPS",
-        "REPLAY_INPUT_STALL_S", "REPLAY_ODIRECT", "REPLAY_SYNTHETIC", "REPLAY_STATE_DIR", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR",
+        "REPLAY_INPUT_STALL_S", "REPLAY_ODIRECT", "REPLAY_SYNTHETIC", "REPLAY_SYNTHETIC_FILE", "REPLAY_STATE_DIR", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR",
         "MXL_OUTPUT_DOMAIN_ID",
         "MXL_HISTORY_DURATION", "MXL_CLEANUP_ON_EXIT", "SHUTDOWN_TIMEOUT_S", "NMOS_ENABLE", "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT",
         "NMOS_QUERY_ADDRESS", "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED", "NMOS_LABEL", "NMOS_TAGS", "NMOS_HOST_ADDRESS", "WEB_ENABLE",
@@ -630,6 +631,26 @@ LoadedConfig loadConfig(std::map<std::string, std::string> const& env, std::map<
     cfg.storageDir = take(values, "REPLAY_STORAGE_DIR", "/data/replay");
     cfg.bufferHours = parseDouble("REPLAY_BUFFER_HOURS", take(values, "REPLAY_BUFFER_HOURS", "2"), 0.01, 48);
     cfg.jpegQuality = parseInt("REPLAY_JPEG_QUALITY", take(values, "REPLAY_JPEG_QUALITY", "92"), 1, 100);
+    auto const codec = lower(take(values, "REPLAY_CODEC", "jpeg"));
+    if (codec == "jpeg")
+    {
+        cfg.codec = PictureCodec::Jpeg;
+    }
+    else if (codec == "vmx")
+    {
+        cfg.codec = PictureCodec::Vmx;
+    }
+    else
+    {
+        throw ConfigError("REPLAY_CODEC must be jpeg or vmx");
+    }
+    cfg.vmx.profile = parseVmxProfile(lower(take(values, "REPLAY_VMX_PROFILE", "hq")));
+    if (cfg.vmx.profile < 0)
+    {
+        throw ConfigError("REPLAY_VMX_PROFILE must be hq, sq, lq, omt_hq, omt_sq or omt_lq");
+    }
+    cfg.vmx.quality = parseInt("REPLAY_VMX_QUALITY", take(values, "REPLAY_VMX_QUALITY", "0"), 0, 98);
+    cfg.vmx.threads = parseInt("REPLAY_VMX_THREADS", take(values, "REPLAY_VMX_THREADS", "1"), 1, 16);
     cfg.uploadMaxMb = parseInt("REPLAY_UPLOAD_MAX_MB", take(values, "REPLAY_UPLOAD_MAX_MB", "8192"), 0, 1048576);
     cfg.protectMaxPct = parseInt("REPLAY_PROTECT_MAX_PCT", take(values, "REPLAY_PROTECT_MAX_PCT", "50"), 1, 100);
     auto const flow = lower(take(values, "REPLAY_FLOW_MODULE", "dis-cuda"));
@@ -684,6 +705,7 @@ LoadedConfig loadConfig(std::map<std::string, std::string> const& env, std::map<
         throw ConfigError("REPLAY_SYNTHETIC must be a boolean");
     }
     cfg.synthetic = flag;
+    cfg.syntheticFile = take(values, "REPLAY_SYNTHETIC_FILE", "");
     cfg.scanPath = take(values, "MXL_DOMAIN_SCAN_PATH", "/Volumes/mxl");
     cfg.historyDurationNs = parseU64("MXL_HISTORY_DURATION", take(values, "MXL_HISTORY_DURATION", "2000000000"), 1, 86400000000000ull);
     if (!parseBool(take(values, "MXL_CLEANUP_ON_EXIT", "false"), &flag))
@@ -925,6 +947,10 @@ std::string exportKeyValue(Config const& config)
     out << "REPLAY_STORAGE_DIR=" << config.storageDir << "\n";
     out << "REPLAY_BUFFER_HOURS=" << config.bufferHours << "\n";
     out << "REPLAY_JPEG_QUALITY=" << config.jpegQuality << "\n";
+    out << "REPLAY_CODEC=" << pictureCodecName(config.codec) << "\n";
+    out << "REPLAY_VMX_PROFILE=" << vmxProfileName(config.vmx.profile) << "\n";
+    out << "REPLAY_VMX_QUALITY=" << config.vmx.quality << "\n";
+    out << "REPLAY_VMX_THREADS=" << config.vmx.threads << "\n";
     out << "REPLAY_UPLOAD_MAX_MB=" << config.uploadMaxMb << "\n";
     out << "REPLAY_PROTECT_MAX_PCT=" << config.protectMaxPct << "\n";
     out << "REPLAY_FLOW_MODULE=" << flowModuleName(config.flowModule) << "\n";

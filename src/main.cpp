@@ -4,6 +4,8 @@
 #include "flow/cuda_flow.hpp"
 #include "media/mosaic.hpp"
 #include "media/timebase.hpp"
+#include "media/v210.hpp"
+#include "media/vmx.hpp"
 #include "mxl/io.hpp"
 #include "nmos/node.hpp"
 #include "ops/api.hpp"
@@ -15,6 +17,7 @@
 #include "util/logging.hpp"
 #include "version.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -24,6 +27,7 @@
 #include <optional>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <sys/resource.h>
@@ -121,6 +125,10 @@ int main(int argc, char** argv)
             }
             mediamtx.start({"mediamtx", path});
         }
+        if (loaded.config.codec == replay::PictureCodec::Vmx && !replay::vmxAvailable())
+        {
+            throw replay::StartupError(78, "REPLAY_CODEC=vmx needs an x86-64 CPU with AVX2 and BMI2 (and a build with VMX)");
+        }
         replay::Engine engine(std::move(loaded.config), flat, loaded.state);
         // The mosaic and its encoder outlive the reader and playout threads that draw into it.
         std::unique_ptr<replay::PreviewMosaic> mosaic;
@@ -128,7 +136,8 @@ int main(int argc, char** argv)
         if (preview.webrtc)
         {
             auto const& cfg = engine.config();
-            mosaic = std::make_unique<replay::PreviewMosaic>(replay::mosaicLayout(cfg), replay::cudaFlowAvailable());
+            // With VMX the pictures never pass through the GPU: the tiles are drawn on the CPU.
+            mosaic = std::make_unique<replay::PreviewMosaic>(replay::mosaicLayout(cfg), replay::cudaFlowAvailable() && cfg.codec == replay::PictureCodec::Jpeg);
             publisher = std::make_unique<replay::PreviewPublisher>(*mosaic, preview.publishUrl, cfg.format.rateNum, cfg.format.rateDen * replay::mosaicStep(cfg));
             engine.setPreviewMosaic(mosaic.get());
             publisher->start([&engine](double seconds) { engine.metrics().observe("preview_encode_seconds", {}, seconds); });
@@ -246,6 +255,49 @@ int main(int argc, char** argv)
                 }
             });
         }
+        // REPLAY_SYNTHETIC_FILE: real pictures for measurements without MXL. One thread per camera,
+        // like the MXL readers, each hands the engine one picture (and a grain of silence) per grain,
+        // on the TAI grid, each camera from another place in the file.
+        std::vector<std::thread> feeders;
+        std::vector<std::uint8_t> syntheticPictures;
+        if (engine.config().synthetic && !engine.config().syntheticFile.empty())
+        {
+            auto const& cfg = engine.config();
+            auto const frameBytes = replay::v210Size(cfg.format.width, cfg.format.height);
+            std::ifstream in(cfg.syntheticFile, std::ios::binary);
+            syntheticPictures.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            auto const count = frameBytes == 0 ? 0 : syntheticPictures.size() / frameBytes;
+            if (count == 0)
+            {
+                throw replay::StartupError(78, "REPLAY_SYNTHETIC_FILE holds no " + cfg.format.token() + " v210 picture: " + cfg.syntheticFile);
+            }
+            replay::logInfo("synthetic_file", {{"file", cfg.syntheticFile}, {"pictures", std::to_string(count)}});
+            for (auto const& camera : cfg.cameras)
+            {
+                feeders.emplace_back([&engine, &syntheticPictures, frameBytes, count, index = camera.index] {
+                    auto const& c = engine.config();
+                    auto const num = c.format.rateNum;
+                    auto const den = c.format.rateDen;
+                    auto const offset = static_cast<std::uint64_t>(index - 1) * count / static_cast<std::uint64_t>(std::max<std::size_t>(1, c.cameras.size()));
+                    auto grain = replay::timestampToIndex(num, den, replay::taiNowNs()) + 1;
+                    while (!gStop.load())
+                    {
+                        auto const tai = replay::indexToTimestamp(num, den, grain);
+                        auto const wait = static_cast<std::int64_t>(tai) - static_cast<std::int64_t>(replay::taiNowNs());
+                        if (wait > 0)
+                        {
+                            std::this_thread::sleep_for(std::chrono::nanoseconds(wait));
+                        }
+                        auto const samples = replay::audioSamplesForFrame(grain, num, den);
+                        engine.ingestAudio(index, tai, std::vector<float>(static_cast<std::size_t>(samples) * 2u, 0.0f), 2);
+                        auto const* picture = syntheticPictures.data() + ((grain + offset) % count) * frameBytes;
+                        engine.ingestV210(index, 1, tai, picture, frameBytes);
+                        // A late grain is skipped, like a reader that fell behind its flow.
+                        grain = std::max(grain + 1, replay::timestampToIndex(num, den, replay::taiNowNs()));
+                    }
+                });
+            }
+        }
         auto next = std::chrono::steady_clock::now();
         // The status goes to the UIs ten times a second; every frame was 50 messages a second
         // per browser for a UI that draws at 10 Hz.
@@ -254,7 +306,7 @@ int main(int argc, char** argv)
         while (!gStop.load())
         {
             auto const tai = replay::taiNowNs();
-            if (engine.config().synthetic)
+            if (engine.config().synthetic && engine.config().syntheticFile.empty())
             {
                 for (auto const& camera : engine.config().cameras)
                 {
@@ -274,6 +326,10 @@ int main(int argc, char** argv)
             std::this_thread::sleep_until(next);
         }
         for (auto& thread : playout)
+        {
+            thread.join();
+        }
+        for (auto& thread : feeders)
         {
             thread.join();
         }

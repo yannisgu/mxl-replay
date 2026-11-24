@@ -35,3 +35,7 @@ The WebRTC preview (1.4.0) adapts code by the same author from:
 The container image bundles MediaMTX (https://github.com/bluenviron/mediamtx),
 MIT License, as a separate program; its licence is in
 /usr/share/doc/mediamtx/LICENSE in the image.
+
+VMX codec (third_party/libvmx)
+Copyright (c) 2025 Open Media Transport Contributors. MIT License, see third_party/libvmx/LICENSE.txt.
+https://github.com/openmediatransport/libvmx

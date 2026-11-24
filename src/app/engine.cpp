@@ -7,6 +7,7 @@
 #include "media/audio.hpp"
 #include "media/convert.hpp"
 #include "media/jpeg.hpp"
+#include "media/picture.hpp"
 #include "media/scale.hpp"
 #include "media/timebase.hpp"
 #include "media/v210.hpp"
@@ -32,6 +33,21 @@
 
 namespace replay
 {
+namespace
+{
+PictureSettings picturesOf(Config const& config)
+{
+    return PictureSettings{config.codec, config.jpegQuality, config.vmx};
+}
+
+// nvJPEG decodes, interpolates and encodes JPEG pictures only: with VMX the pictures are coded on
+// the CPU, and interpolation runs only where the CPU path is allowed (REPLAY_ALLOW_CPU_INTERP).
+bool gpuPictures(Config const& config)
+{
+    return config.codec == PictureCodec::Jpeg && cudaFlowAvailable();
+}
+} // namespace
+
 namespace
 {
 Yuv422 toFloat(Frame10 const& frame)
@@ -266,7 +282,7 @@ Engine::Engine(Config config, std::map<std::string, std::string> settings, std::
     {
         int const fpsNum = camera.nativeFps > 0 ? camera.nativeFps : config_.format.rateNum;
         int const fpsDen = camera.nativeFps > 0 ? 1 : config_.format.rateDen;
-        required += bytesPerHourEstimate(config_.format.width, config_.format.height, fpsNum, fpsDen, config_.jpegQuality) * camera.bufferHours;
+        required += pictureBytesPerHourEstimate(config_.format.width, config_.format.height, fpsNum, fpsDen, picturesOf(config_)) * camera.bufferHours;
         required += 48000.0 * 2.0 * 4.0 * 3600.0 * camera.bufferHours;
     }
     cameraBudgetBytes_ = static_cast<std::uint64_t>(required);
@@ -287,7 +303,7 @@ Engine::Engine(Config config, std::map<std::string, std::string> settings, std::
     std::filesystem::remove_all(uploadDirectory(), ec);
     std::filesystem::create_directories(uploadDirectory(), ec);
     loadRoutes();
-    gpu_ = cudaFlowAvailable();
+    gpu_ = gpuPictures(config_);
     auto const period = framePeriodNs(config_.format.rateNum, config_.format.rateDen);
     if (config_.odirect)
     {
@@ -314,7 +330,7 @@ Engine::Engine(Config config, std::map<std::string, std::string> settings, std::
         // Its next pictures are decoded ahead on a worker whose GPU stream has the playout's priority (set up at
         // its first decode: a channel that never plays a stored picture has no GPU state for it).
         runtime.pictures = std::make_shared<AheadPictures>();
-        if (cudaFlowAvailable())
+        if (gpuPictures(config_))
         {
             runtime.pictures->gpu = gpuPicturesCreate(DecodeAhead::kSlots);
         }
@@ -537,10 +553,13 @@ void Engine::storeFrame(CameraRuntime& camera, std::uint64_t taiNs, Frame10 cons
 {
     StoredFrame stored;
     stored.taiNs = taiNs;
-    stored.jpeg = gpuEncodeFrame10(frame, config_.jpegQuality);
+    if (gpuPictures(config_))
+    {
+        stored.jpeg = gpuEncodeFrame10(frame, config_.jpegQuality);
+    }
     if (stored.jpeg.empty())
     {
-        stored.jpeg = encodeJpeg422(frame, config_.jpegQuality);
+        stored.jpeg = encodePicture422(frame, picturesOf(config_));
     }
     stored.audio = audio;
     pending.push_back(std::move(stored));
@@ -620,7 +639,8 @@ void Engine::ingestV210(int camera, int phase, std::uint64_t taiNs, std::uint8_t
         return;
     }
     auto const rowBytes = static_cast<int>(v210RowBytes(config_.format.width));
-    auto jpeg = gpuEncodeV210(packed, config_.format.width, config_.format.height, rowBytes, config_.jpegQuality);
+    auto jpeg = gpuPictures(config_) ? gpuEncodeV210(packed, config_.format.width, config_.format.height, rowBytes, config_.jpegQuality)
+                                     : std::vector<std::uint8_t>{};
     // The camera's preview tile (phase 1): from the grain on the GPU, or sampled on the CPU below.
     bool const drawTile = mosaic_ != nullptr && phase <= 1 && camera >= 1 && mosaicDue(taiNs);
     if (drawTile && !jpeg.empty())
@@ -645,7 +665,7 @@ void Engine::ingestV210(int camera, int phase, std::uint64_t taiNs, std::uint8_t
             ingestVideo(camera, phase, taiNs, std::move(frame));
             return;
         }
-        jpeg = encodeJpegV210(packed, config_.format.width, config_.format.height, rowBytes, config_.jpegQuality);
+        jpeg = encodePictureV210(packed, config_.format.width, config_.format.height, rowBytes, picturesOf(config_));
         if (drawTile)
         {
             mosaic_->drawV210(config_.channels + camera - 1, packed, config_.format.width, config_.format.height);
@@ -778,7 +798,7 @@ Frame10 Engine::frameAt(int camera, std::uint64_t taiNs, bool* found) const
     {
         return frame;
     }
-    if (!decodeJpeg422(stored->jpeg.data(), stored->jpeg.size(), frame))
+    if (!decodePicture422(stored->jpeg.data(), stored->jpeg.size(), frame))
     {
         return frame;
     }
@@ -829,7 +849,7 @@ bool Engine::v210At(int camera, std::uint64_t taiNs, std::vector<std::uint8_t>& 
     }
     if (!ok)
     {
-        ok = decodeJpegToV210(stored->jpeg.data(), stored->jpeg.size(), config_.format.width, config_.format.height, 0, v210.data());
+        ok = decodePictureToV210(stored->jpeg.data(), stored->jpeg.size(), config_.format.width, config_.format.height, 0, v210.data());
     }
     last.jpeg = ok ? std::move(stored->jpeg) : std::vector<std::uint8_t>{};
     last.key.clear();
@@ -1062,7 +1082,7 @@ RenderedFrame Engine::render(int channel, std::uint64_t outputTaiNs, AudioReady 
         auto const taiOut = nearest(runtime.mix.scheduler.positionNs, outCamera);
         auto const taiIn = nearest(runtime.scheduler.positionNs, camera);
         double const weight = mixWeight(runtime.mix.done, runtime.mix.videoFrames);
-        bool const gpu = cudaFlowAvailable();
+        bool const gpu = gpuPictures(config_);
         if (ringOut != nullptr && ringIn != nullptr)
         {
             lock.unlock();
@@ -1092,8 +1112,8 @@ RenderedFrame Engine::render(int channel, std::uint64_t outputTaiNs, AudioReady 
                 else
                 {
                     Frame10 frameIn;
-                    if (decodeJpeg422(storedOut->jpeg.data(), storedOut->jpeg.size(), mixPicture) &&
-                        decodeJpeg422(storedIn->jpeg.data(), storedIn->jpeg.size(), frameIn) && mixPicture.width == frameIn.width &&
+                    if (decodePicture422(storedOut->jpeg.data(), storedOut->jpeg.size(), mixPicture) &&
+                        decodePicture422(storedIn->jpeg.data(), storedIn->jpeg.size(), frameIn) && mixPicture.width == frameIn.width &&
                         mixPicture.height == frameIn.height)
                     {
                         blendInto(mixPicture, frameIn, weight);
@@ -1108,7 +1128,7 @@ RenderedFrame Engine::render(int channel, std::uint64_t outputTaiNs, AudioReady 
             }
         }
     }
-    if (auto const* ring = ringOf(camera); !mixed && !runtime.black && cudaFlowAvailable() && ring != nullptr)
+    if (auto const* ring = ringOf(camera); !mixed && !runtime.black && gpuPictures(config_) && ring != nullptr)
     {
         // Read, decode, interpolate and download without the engine lock, so channels and
         // the recorder do not wait for each other's disk or GPU work.
@@ -1384,7 +1404,7 @@ AheadFlow Engine::computeFlow(FlowAhead::Pair const& pair, int channel)
     {
         return flow;
     }
-    if (cudaFlowAvailable())
+    if (gpuPictures(config_))
     {
         auto const a = ring->findNearest(pair.taiA);
         auto const b = ring->findNearest(pair.taiB);
@@ -1549,7 +1569,7 @@ bool Engine::decodeAheadFrame(AheadPictures& pictures, AheadFrame const& frame, 
     }
     auto& v210 = pictures.v210[static_cast<std::size_t>(slot)];
     v210.resize(v210Size(width, height));
-    return decodeJpegToV210(stored->jpeg.data(), stored->jpeg.size(), width, height, 0, v210.data());
+    return decodePictureToV210(stored->jpeg.data(), stored->jpeg.size(), width, height, 0, v210.data());
 }
 
 void Engine::countDecodeAhead(int channel, AheadTaker const& taker)
@@ -1946,7 +1966,7 @@ bool Engine::protectionFull() const
     for (std::size_t i = 0; i < cameras_.size(); ++i)
     {
         double const fps = static_cast<double>(config_.format.rateNum) / static_cast<double>(config_.format.rateDen) * hfrFactor(static_cast<int>(i + 1));
-        budget += static_cast<std::uint64_t>(bytesPerFrameEstimate(config_.format.width, config_.format.height, config_.jpegQuality) * fps * 3600.0 *
+        budget += static_cast<std::uint64_t>(pictureBytesPerFrameEstimate(config_.format.width, config_.format.height, picturesOf(config_)) * fps * 3600.0 *
                                               config_.cameras[i].bufferHours);
         protectedBytes += cameras_[i].ring.protectedBytes();
     }
@@ -2621,10 +2641,10 @@ std::string Engine::storeUpload(UploadSource const& source, std::string const& n
         // House frame n shows source frame `sourceFrame`; a repeated source frame is encoded once (1.8.1).
         if (!haveJpeg || sourceFrame != encoded)
         {
-            jpeg = gpuEncodeFrame10(picture, config_.jpegQuality);
+            jpeg = gpuPictures(config_) ? gpuEncodeFrame10(picture, config_.jpegQuality) : std::vector<std::uint8_t>{};
             if (jpeg.empty())
             {
-                jpeg = encodeJpeg422(picture, config_.jpegQuality);
+                jpeg = encodePicture422(picture, picturesOf(config_));
             }
             encoded = sourceFrame;
             haveJpeg = true;
@@ -2815,7 +2835,7 @@ std::string Engine::exportClip(std::string const& id, std::string& error)
     {
         auto const stored = ring->findNearest(tai);
         Frame10 frame;
-        if (!stored || !decodeJpeg422(stored->jpeg.data(), stored->jpeg.size(), frame))
+        if (!stored || !decodePicture422(stored->jpeg.data(), stored->jpeg.size(), frame))
         {
             continue;
         }
@@ -3304,7 +3324,7 @@ std::vector<std::uint8_t> Engine::storedPreview(int camera, std::uint64_t taiNs)
     // decode is DCT-scaled (a quarter of 1080p), not a full-size decode.
     auto const stored = ring != nullptr ? ring->findNearest(taiNs) : std::nullopt;
     Frame10 small;
-    if (!stored || stored->jpeg.empty() || !decodeJpegPreview(stored->jpeg.data(), stored->jpeg.size(), 384, small))
+    if (!stored || stored->jpeg.empty() || !decodePicturePreview(stored->jpeg.data(), stored->jpeg.size(), 384, small))
     {
         return {};
     }
@@ -3389,7 +3409,7 @@ bool Engine::gpuInterpolate() const
 
 void Engine::setGpuPresent(bool present)
 {
-    gpu_ = present || cudaFlowAvailable();
+    gpu_ = (present || cudaFlowAvailable()) && config_.codec == PictureCodec::Jpeg;
 }
 
 void Engine::updateMetrics(std::chrono::steady_clock::time_point now)
@@ -3842,7 +3862,7 @@ std::string Engine::statusJson() const
         << ",\"format\":" << jsonString(config_.format.token()) << ",\"gpu\":" << (gpuInterpolate() ? "true" : "false")
         << ",\"flow\":" << jsonString(flowModuleName(config_.flowModule)) << ",\"preset\":" << jsonString(presetName(config_.preset))
         << ",\"storage_bps\":" << storageBps_ << ",\"free_bytes\":" << freeBytes() << ",\"jpeg\":\"" << jpegRuntimeBackend()
-        << "\",\"jpeg_bit_depth\":" << jpegStorageBitDepth() << ",\"tsl_enable\":" << (config_.tslEnable ? "true" : "false")
+        << "\",\"jpeg_bit_depth\":" << jpegStorageBitDepth() << ",\"codec\":\"" << pictureCodecName(config_.codec) << "\"" << ",\"tsl_enable\":" << (config_.tslEnable ? "true" : "false")
         << ",\"cameras\":[";
     for (std::size_t i = 0; i < cameras_.size(); ++i)
     {
