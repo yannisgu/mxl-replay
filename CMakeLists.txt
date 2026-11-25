@@ -120,6 +120,14 @@ endif()
 # Encode and decode speed, size and PSNR of the picture codecs on real pictures (docs/benchmarks).
 add_executable(mxl-replay-codec-bench tests/bench/codec_bench.cpp)
 target_link_libraries(mxl-replay-codec-bench PRIVATE replay-core)
+# The codecs' encode with many cameras encoding at once (docs/benchmarks).
+add_executable(mxl-replay-encode-scale tests/bench/encode_scale.cpp)
+target_link_libraries(mxl-replay-encode-scale PRIVATE replay-core)
+if(TARGET vmx)
+    # A paced VMX encode against a flat-out one (docs/benchmarks).
+    add_executable(vmx-pace tests/bench/vmx_pace.cpp)
+    target_link_libraries(vmx-pace PRIVATE replay-core)
+endif()
 
 find_package(mxl CONFIG QUIET)
 set(REPLAY_UI_SOURCE "")

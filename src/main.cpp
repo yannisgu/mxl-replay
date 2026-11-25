@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <sys/resource.h>
+#include <pthread.h>
 #include <thread>
 #include <vector>
 
@@ -209,6 +210,7 @@ int main(int argc, char** argv)
         for (int channel = 1; channel <= engine.config().channels; ++channel)
         {
             playout.emplace_back([&engine, &bridge, channel] {
+                pthread_setname_np(pthread_self(), ("rp-out-" + std::to_string(channel)).c_str());
                 // The playout's GPU stream is above the flows computed ahead, the recording and the previews.
                 replay::gpuPrepareThread(replay::GpuPriority::Playout);
                 // One grain per house period on the TAI grid, rendered for the grain's own time.
@@ -275,6 +277,7 @@ int main(int argc, char** argv)
             for (auto const& camera : cfg.cameras)
             {
                 feeders.emplace_back([&engine, &syntheticPictures, frameBytes, count, index = camera.index] {
+                    pthread_setname_np(pthread_self(), ("rp-cam-" + std::to_string(index)).c_str());
                     auto const& c = engine.config();
                     auto const num = c.format.rateNum;
                     auto const den = c.format.rateDen;

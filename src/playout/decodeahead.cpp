@@ -1,6 +1,7 @@
 #include "playout/decodeahead.hpp"
 
 #include <algorithm>
+#include <pthread.h>
 #include <utility>
 
 namespace replay
@@ -8,6 +9,7 @@ namespace replay
 DecodeAhead::DecodeAhead(Decode decode, std::function<void()> const& start)
     : decode_(std::move(decode))
     , thread_([this, start] {
+        pthread_setname_np(pthread_self(), "rp-ahead");
         if (start)
         {
             start();
