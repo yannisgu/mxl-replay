@@ -102,7 +102,7 @@ VMX, the codec of Open Media Transport, as the stored picture codec (`REPLAY_COD
 
 ### The replay
 
-`tests/bench/replay_bench.py` runs the whole process. Every camera records the three sequences, each from another place, and channel n plays camera n from 10 s back. It measures 30 s after 18 s of recording. There were two rounds, and in each the codecs ran one after the other for every case. The codec columns give the process's CPU in cores. The last column says whether every camera recorded 50 pictures a second, every channel output 50 grains a second, and no channel resynced; the render time per output grain comes from `playout_seconds{stage="render"}`. VMX q95 is `REPLAY_VMX_QUALITY=95`, measured in the second round only.
+`tests/bench/replay_bench.py` runs the whole process. Every camera records the three sequences, each from another place, and channel n plays camera n from 10 s back. It measures 30 s after 18 s of recording. There were two rounds, and in each the codecs ran one after the other for every case. The codec columns give the process's CPU in cores. The last column says whether every camera recorded 50 pictures a second, every channel output 50 grains a second, and no channel resynced; the render time per output grain comes from `playout_seconds{stage="render"}`. VMX q95 is `REPLAY_VMX_QUALITY=95`, measured in the second round only. This VM has shared vCPUs, which slow down a paced encode (see the run of 2026-11-25), so these figures understate VMX's saving.
 
 | Cameras, channels, playout | JPEG q92: CPU cores | VMX `hq` | VMX q95 | Keeps up |
 | --- | --- | --- | --- | --- |
@@ -117,3 +117,49 @@ VMX, the codec of Open Media Transport, as the stored picture codec (`REPLAY_COD
 - At 1×, render time per grain is 0.2–1.7 ms higher with VMX. The cause is not known yet, and it stays far below the 20 ms period.
 
 Not measured: a host with a GPU (VMX uses none of it: recording and playout stay on the CPU and interpolation is not available, see README "VMX"), 2160p, HFR, and VMX's 10-bit gain on a 10-bit source.
+
+## Lab run 2026-11-25: dedicated cores
+
+On the lmjob VM (Hetzner, shared vCPUs), VMX saved no CPU with 8 cameras and 2 channels, although each encode takes 30–45 % less time. The host caused it. On shared vCPUs, an encode that starts after the thread slept 8–14 ms or more runs at about half speed, with either codec. `vmx-pace` measured VMX `hq` at 4.5 ms flat out and 8–11 ms after a sleep of 8–20 ms, and JPEG q92 at 8 ms flat out and 15–18 ms after a sleep of 14–20 ms. A camera thread encodes once every 20 ms and sleeps the rest. VMX's faster encode leaves a sleep of about 15 ms, past the threshold, so it lost its gain. JPEG's sleep of about 12 ms mostly stayed under it.
+
+The same runs repeated on an Infomaniak Public Cloud VM with dedicated cores (`a16-ram32-disk80-perf1`, 16 vCPU AMD EPYC Genoa, no SMT, nothing else running), with Debian sid in Docker and the same pictures.
+
+### A paced encode
+
+| | JPEG q92 | VMX `hq` | VMX q95 |
+| --- | --- | --- | --- |
+| one encode, flat out (`vmx-pace`) | 7.47 ms | 4.62 ms | |
+| one encode after a 14 ms sleep | 7.58 ms | 4.78 ms | |
+| 8 cameras at 50/s (`mxl-replay-encode-scale`): CPU per encode | 7.42 ms | 4.95 ms | 5.97 ms |
+| 8 cameras at 50/s: cores | 2.97 | 1.98 (−33 %) | 2.39 (−20 %) |
+
+The codec bench gave the same per-picture times as on the lmjob VM. For `crowd_run`, JPEG q92 took 7.57 ms to encode and 9.54 to decode, VMX `hq` 4.75 and 6.22, and VMX q95 5.52 and 7.85.
+
+### The replay, 8 cameras, 2 channels
+
+`replay_bench.py` ran 30 s per case, in two rounds. This flavour caps the disk at 200 MB/s and 500 IOPS, and `dd` wrote 173 MB/s. 8 cameras of JPEG q92 need about 330 MB/s on these pictures, and VMX `hq` about 225 MB/s.
+
+On the VM's disk:
+
+| Codec | Playout | Recorded/s per camera | Output/s | Resyncs | Render ms | CPU cores |
+| --- | --- | --- | --- | --- | --- | --- |
+| JPEG q92 | 1× repeat | 41.7, 42.0 | 50.0 | 0 | 1.1–1.2 | 3.80, 3.85 |
+| VMX `hq` | 1× repeat | 50.0, 50.0 | 50.0 | 0 | 1.3–1.6 | 3.11, 3.15 |
+| VMX q95 | 1× repeat | 39.9, 39.9 | 50.0 | 0 | 1.3–1.4 | 3.09, 3.13 |
+| JPEG q92 | 0.5× blend | 41.9, 42.0 | 50.0 | 0 | 1.3 | 3.46, 3.42 |
+| VMX `hq` | 0.5× blend | 49.9, 50.0 | 50.0 | 0 | 1.5–1.6 | 2.84, 2.85 |
+| VMX q95 | 0.5× blend | 40.0, 40.0 | 50.0 | 0 | 1.5–1.6 | 2.81, 2.78 |
+
+With the ring in RAM (`--storage /dev/shm/media`, `REPLAY_BUFFER_HOURS=0.01`), 1× repeat:
+
+| Codec | Recorded/s per camera | Output/s | Resyncs | Render ms | CPU cores |
+| --- | --- | --- | --- | --- | --- |
+| JPEG q92 | 50.0, 50.0 | 50.0 | 0 | 1.2, 1.3 | 4.28, 4.23 |
+| VMX `hq` | 50.0, 50.0 | 50.0 | 0 | 1.3, 1.6 | 2.94, 3.09 (−29 %) |
+| VMX q95 | 50.0, 50.0 | 50.0 | 0 | 1.3, 1.5 | 3.47, 3.52 (−18 %) |
+
+Split by thread group (from `/proc`, over 10 s, on the disk), the camera threads used 3.06 cores with JPEG and 2.29 with VMX `hq`, the decode workers 0.91 and 0.68, and the output threads 0.12 and 0.15.
+
+- On dedicated cores, VMX saves what its encode and decode save. With 8 cameras and 2 channels the process uses 29 % less CPU with `hq`, and 18 % less at JPEG's quality (q95).
+- On this flavour's disk, only VMX `hq` records 8 cameras in full, because its pictures are a third smaller. JPEG q92 and VMX q95 record 40–42 pictures a second per camera. The disk limits them, not the CPU.
+- Measure CPU on hosts with dedicated cores. Shared vCPUs slow down a thread that sleeps between pictures, and all of the replay's threads do.

@@ -6,6 +6,8 @@
 - `REPLAY_SYNTHETIC_FILE`. With `REPLAY_SYNTHETIC`, every camera records raw v210 pictures from a file, each on its own thread like an MXL reader. This allows measurements on real pictures without MXL.
 - New benchmarks. `mxl-replay-codec-bench` measures encode, decode and preview time, size and PSNR per codec on real pictures. `tests/bench/vmx_probe.cpp` times libvmx alone. `tests/bench/replay_bench.py` measures the whole replay under load, and `tests/bench/lab.sh` runs them all. Results are in `docs/benchmarks/README.md` ("CPU codecs"). At JPEG q92's quality, VMX codes a 1080p picture in 30 % less time. On the first lab VM the whole process saved 9–21 % of its CPU from 12 cameras on.
 - Two fixes in the vendored libvmx. With one thread it now codes on the calling thread. Its worker thread had made a picture take 4–10 ms instead of 3–4 on a VM. Its thread pool no longer hangs when destroyed right after it was created.
+- `mxl-replay-encode-scale` measures the encode cost with N cameras at once, paced at 50/s or flat out. `vmx-pace` times one encode after no gap, a busy-wait or a sleep. The camera feeders, output threads and decode workers now have names (`rp-cam-N`, `rp-out-N`, `rp-ahead`), so `/proc` can split the process's CPU by thread.
+- On a VM with dedicated cores, 8 cameras and 2 channels take 29 % less CPU with VMX `hq` and 18 % less at JPEG's quality (`docs/benchmarks/README.md`, "dedicated cores"). The first lab VM had shared vCPUs, which slow down a thread that sleeps between pictures and hid that saving.
 - New tests cover the VMX settings, a 10-bit round trip at 1920, 1926 and 64 pixels wide (v210 directly and through 16-bit frames, and previews), JPEG and VMX in one ring, and damaged pictures.
 
 ## 1.8.7 (2026-11-10)

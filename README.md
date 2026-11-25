@@ -53,7 +53,7 @@ The container image is the GPU build. It still starts with no GPU, which is enou
 
 VMX pictures don't use a GPU. nvJPEG decodes only JPEG, so recording, playout and previews run on the CPU, and `interpolate` falls back to blend unless `REPLAY_ALLOW_CPU_INTERP` is set.
 
-At the default JPEG's quality (`REPLAY_VMX_QUALITY=95` against `REPLAY_JPEG_QUALITY=92`), VMX encodes and decodes a 1080p picture in about 30 % less time than libjpeg-turbo, at the same size. The `hq` default takes about 45 % less time and makes smaller pictures, close to JPEG q80 in quality. The whole replay saves less: 9–21 % of its CPU from 12 cameras on, and nothing measurable with 4 (`docs/benchmarks/README.md`, "CPU codecs").
+At the default JPEG's quality (`REPLAY_VMX_QUALITY=95` against `REPLAY_JPEG_QUALITY=92`), VMX encodes and decodes a 1080p picture in about 30 % less time than libjpeg-turbo, at the same size. The `hq` default takes about 45 % less time and makes smaller pictures, close to JPEG q80 in quality. The measurements are in `docs/benchmarks/README.md` ("CPU codecs"). With 8 cameras and 2 channels on dedicated cores, the whole process uses 29 % less CPU with `hq` and 18 % less with quality 95 ("dedicated cores").
 
 libvmx's profiles aim at a fixed size per frame, whatever the content. `hq` makes about 570 KB per 1080 picture, about 105 GB per hour per camera at 50p, and `sq` half of that. `REPLAY_VMX_QUALITY` fixes the quality instead, and the size then follows the content (98 gives about 1.5 MB per frame on busy pictures). The free-space check uses the profile's largest frame size.
 
