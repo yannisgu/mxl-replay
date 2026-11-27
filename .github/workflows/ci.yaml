@@ -111,6 +111,11 @@ jobs:
           chmod +x tests/integration/state_config.sh
           tests/integration/state_config.sh build/mxl-replay
 
+      - name: Integration (routes restored after a restart)
+        run: |
+          chmod +x tests/integration/route_restore.sh
+          tests/integration/route_restore.sh build/mxl-replay
+
       - name: Integration (uploads)
         run: |
           chmod +x tests/integration/upload.sh

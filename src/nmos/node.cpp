@@ -148,6 +148,19 @@ void addTags(nmos::resource& resource, std::map<std::string, std::vector<std::st
         }
     }
 }
+// The IS-04 receiver's subscription for a route restored from routes.json, as an IS-05 activation of
+// that route sets it (nmos-cpp's set_resource_subscription). Without it, after a restart IS-05 /active
+// had master_enable true and the sender, and the replay recorded it, while the IS-04 subscription (what
+// the registry, the Query API and controllers show) said active false and no sender.
+void restoreSubscription(nmos::resource& receiver, Route const& saved)
+{
+    if (saved.active)
+    {
+        nmos::set_resource_subscription(receiver, true,
+            saved.senderId.empty() ? nmos::id{} : us(saved.senderId), nmos::tai_now());
+    }
+}
+
 void restoreReceiver(nmos::resource& connection, Route const& saved)
 {
     if (saved.senderId.empty() && saved.flowId.empty() && saved.domainId.empty() && !saved.active)
@@ -337,6 +350,7 @@ void NmosNode::start()
                         }
                         receiver.data[U("caps")][U("constraint_sets")] = web::json::value_of({interlace});
                         receiver.data[U("caps")][U("version")] = web::json::value::string(nmos::make_version());
+                        restoreSubscription(receiver, impl_->engine.route(camera.index, phase, true));
                         nmos::insert_resource(nodeModel.node_resources, std::move(receiver));
                         auto connection = nmos::make_connection_mxl_receiver(us(id), {});
                         connection.data[U("active")][U("master_enable")] = web::json::value::boolean(false);
@@ -348,6 +362,7 @@ void NmosNode::start()
                         {nmos::media_types::audio_float32}, nodeModel.settings);
                     audio.data[U("label")] = web::json::value::string(us(camera.label + " Audio"));
                     tagGroup(audio, camera.label, "Audio");
+                    restoreSubscription(audio, impl_->engine.route(camera.index, 1, false));
                     nmos::insert_resource(nodeModel.node_resources, std::move(audio));
                     auto audioConnection = nmos::make_connection_mxl_receiver(us(audioId), {});
                     audioConnection.data[U("active")][U("master_enable")] = web::json::value::boolean(false);
