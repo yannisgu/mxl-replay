@@ -2,6 +2,8 @@ build/
 build-*/
 web/node_modules/
 web/dist/
+operator-ui/node_modules/
+operator-ui/dist/
 .cache/
 *.sqlite
 *.sqlite-shm

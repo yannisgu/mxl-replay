@@ -1,0 +1,71 @@
+/* LSM operator screen, fluid: a fixed full-window console on large screens, a scrolling page on small ones.
+   Colour rules: red is the on-air tally and nothing else. Blue marks the channel under control (the one the keys,
+   the angle tiles and the clip bin act on). Green plays, yellow is cued. */
+:root {
+  --bg: #0b0f14; --panel: #121922; --panel2: #18212c; --sunk: #0a0f15; --border: #243142; --border2: #34455a;
+  --text: #d7e0ea; --muted: #8597ab; --muted-on-tint: #b3c1d0; --accent: #4da3ff; --accent-tint: rgba(77,163,255,.16);
+  --ok: #3fb968; --cue: #e8c33a; --warn: #e0a83a; --tally: #ff3b30; --tally-fill: #cc2418; --chip: #1e2a38;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); }
+::selection { background: var(--accent); color: #031426; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+* { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: .45; }
+svg.i { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; flex: none; }
+svg.i.fill { fill: currentColor; stroke: none; }
+.tc { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+
+/* Layout. Large (≥1200×720): one console filling the window, the playlist as a sidebar, clips and entries scroll.
+   Medium: the page scrolls; clips and playlist side by side under the cameras. Small (<760): one column. */
+#stage { display: grid; gap: 10px; padding: 10px; min-height: 100dvh;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas: "ch ch" "cams cams" "clips side"; grid-template-rows: auto auto minmax(420px, auto); }
+#channels { grid-area: ch; }
+#cams { grid-area: cams; }
+#bottom { grid-area: clips; max-height: 70dvh; }
+#side { grid-area: side; max-height: 70dvh; }
+@media (min-width: 1200px) and (min-height: 720px) {
+  #stage { height: 100dvh; min-height: 0; overflow: hidden;
+    grid-template-columns: minmax(0, 1fr) clamp(320px, 24vw, 460px);
+    grid-template-areas: "ch side" "cams side" "clips side"; grid-template-rows: auto auto minmax(0, 1fr); }
+  #bottom, #side { max-height: none; }
+}
+@media (max-width: 759px) {
+  #stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "ch" "cams" "clips" "side"; grid-template-rows: auto; padding: 6px; gap: 6px; }
+  #bottom { max-height: 60dvh; }
+  #side { max-height: 80dvh; min-height: 360px; }
+}
+
+/* buttons */
+.b { display: inline-flex; align-items: center; justify-content: center; gap: 5px; background: var(--chip); border: 1px solid var(--border);
+  border-radius: 5px; height: 30px; padding: 0 9px; font-size: 13px; font-weight: 600; min-width: 36px; white-space: nowrap; transition: border-color .12s, background-color .12s; }
+.b:hover:not(:disabled) { border-color: var(--muted); }
+.b:active:not(:disabled) { background: var(--panel2); }
+.b.on { background: var(--accent); border-color: var(--accent); color: #031426; }
+.b.play.on { background: var(--ok); border-color: var(--ok); color: #06140b; }
+.b.livebtn.on { background: var(--text); border-color: var(--text); color: var(--bg); }
+.b kbd { font: 600 11px var(--mono); color: var(--muted); }
+.b.on kbd { color: inherit; opacity: .7; }
+.btns { display: flex; gap: 4px; }
+
+/* panes */
+.pane { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: grid; grid-template-rows: auto 1fr; min-height: 0; overflow: hidden; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 13px; min-height: 44px; }
+.pane-head h2 { margin: 0 6px 0 0; font-size: 13px; font-weight: 700; }
+.chip { display: inline-flex; align-items: center; gap: 5px; background: var(--chip); border: 1px solid var(--border); border-radius: 99px; padding: 3px 11px; font-size: 12px; }
+.chip:hover { border-color: var(--muted); }
+.chip.on { background: var(--accent-tint); border-color: var(--accent); }
+.hint { font-size: 12px; color: var(--muted); }
+.hint b { color: var(--accent); font-weight: 600; }
+.empty { color: var(--muted); font-size: 13px; padding: 18px; text-align: center; }
+.sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: 0; }
+.thumb { display: block; object-fit: cover; background: #000; }
+
+/* status line when the replay does not answer */
+.notice { position: fixed; inset: 0; padding: 16px; text-align: center; display: grid; place-items: center; color: var(--muted); font-size: 18px; }

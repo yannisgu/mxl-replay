@@ -1372,6 +1372,11 @@ TEST_CASE("api edits clips and playlists and serves previews")
     CHECK(clip.end == EndAction::Loop);
     CHECK(clip.motion == "blend");
     CHECK(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"end\":\"sideways\"}").status == 400);
+    // The camera: one of the inputs (this engine has one).
+    CHECK(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"camera\":1}").status == 200);
+    CHECK(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"camera\":2}").status == 400);
+    CHECK(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"camera\":0}").status == 400);
+    CHECK(engine->clip(id).camera == 1);
     CHECK(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"out_ns\":" + std::to_string(frameTime(1)) + "}").status == 400);
     CHECK(call(*engine, "PATCH", "/api/v1/clips/clip-999", "{\"name\":\"x\"}").status == 404);
 
@@ -1412,6 +1417,63 @@ TEST_CASE("api edits clips and playlists and serves previews")
     CHECK(call(*engine, "POST", "/api/v1/playlists/playlist-999/cue", "{\"channel\":1}").status == 404);
     CHECK(call(*engine, "POST", "/api/v1/playlists/" + pid + "/play", "{\"channel\":1}").status == 200);
     CHECK(call(*engine, "GET", "/api/v1/status").body.find("\"shot\":\"playing\"") != std::string::npos);
+    // `index` cues (or plays) from that entry; one outside the playlist is refused.
+    REQUIRE(call(*engine, "PUT", "/api/v1/playlists/" + pid, "{\"clips\":[\"" + id + "\",\"" + id + "\"]}").status == 200);
+    auto const second = call(*engine, "POST", "/api/v1/playlists/" + pid + "/cue", "{\"channel\":1,\"index\":1}");
+    CHECK(second.status == 200);
+    CHECK(second.body.find("\"playlist_index\":1") != std::string::npos);
+    CHECK(second.body.find("\"shot\":\"cued\"") != std::string::npos);
+    CHECK(call(*engine, "POST", "/api/v1/playlists/" + pid + "/cue", "{\"channel\":1,\"index\":2}").status == 400);
+    CHECK(call(*engine, "POST", "/api/v1/playlists/" + pid + "/cue", "{\"channel\":1,\"index\":-1}").status == 400);
+    // Uncue: the channel lets go of the playlist and its clip and stays where it is, paused; its marks stay.
+    auto const field = [](std::string const& body, std::string const& key) {
+        auto const at = body.find("\"" + key + "\":") + key.size() + 3;
+        return body.substr(at, body.find_first_of(",}", at) - at);
+    };
+    auto const position = field(engine->statusJson(), "position_ns");
+    auto const uncued = call(*engine, "POST", "/api/v1/channels/1/transport", "{\"command\":\"uncue\"}");
+    CHECK(uncued.status == 200);
+    CHECK(uncued.body.find("\"playlist\":\"\"") != std::string::npos);
+    CHECK(uncued.body.find("\"shot\":\"paused\"") != std::string::npos);
+    CHECK(field(uncued.body, "position_ns") == position);
+    CHECK(field(uncued.body, "has_in") == "true");
+    CHECK(field(uncued.body, "clip") == "\"\"");
+    // A copy: the same fields under a new id, "(copy)" or the given name; it outlives the original.
+    auto const copy = call(*engine, "POST", "/api/v1/clips/" + id + "/copy", "{}");
+    REQUIRE(copy.status == 201);
+    auto const copyId = idOf(copy.body);
+    CHECK(copyId != id);
+    CHECK(engine->clip(copyId).name == engine->clip(id).name + " (copy)");
+    CHECK(engine->clip(copyId).inNs == engine->clip(id).inNs);
+    CHECK(engine->clip(copyId).speed == doctest::Approx(engine->clip(id).speed));
+    auto const named = call(*engine, "POST", "/api/v1/clips/" + id + "/copy", "{\"name\":\"second\"}");
+    CHECK(engine->clip(idOf(named.body)).name == "second");
+    CHECK(call(*engine, "POST", "/api/v1/clips/clip-999/copy", "{}").status == 404);
+    CHECK(call(*engine, "DELETE", "/api/v1/clips/" + idOf(named.body)).status == 200);
+    // The tag list: a default until one is stored; GET has every tag of the list or a clip, most used first; POST
+    // adds one; PUT replaces the list (checked); a rename reaches the clips; the config export carries the list.
+    CHECK(call(*engine, "GET", "/api/v1/tags").body.find("{\"name\":\"Goal\",") != std::string::npos);
+    CHECK(call(*engine, "PUT", "/api/v1/tags", "{\"tags\":[\" Goal \",\"Save\"]}").status == 200);
+    CHECK(engine->tagList() == std::vector<std::string>{"Goal", "Save"});
+    CHECK(call(*engine, "PUT", "/api/v1/tags", "{\"tags\":[\"Goal\",\"goal\"]}").status == 400);
+    CHECK(call(*engine, "PUT", "/api/v1/tags", "{\"tags\":[\"a,b\"]}").status == 400);
+    CHECK(call(*engine, "POST", "/api/v1/tags", "{\"name\":\"Penalty\"}").status == 200);
+    CHECK(call(*engine, "POST", "/api/v1/tags", "{\"name\":\"penalty\"}").status == 200);
+    CHECK(call(*engine, "POST", "/api/v1/tags", "{\"name\":\" \"}").status == 400);
+    CHECK(engine->tagList() == std::vector<std::string>{"Goal", "Save", "Penalty"});
+    REQUIRE(call(*engine, "PATCH", "/api/v1/clips/" + id, "{\"tags\":\"goal, Home\"}").status == 200);
+    auto const used = call(*engine, "GET", "/api/v1/tags").body;
+    CHECK(used.rfind("{\"tags\":[{\"name\":\"Goal\",\"clips\":", 0) == 0); // the most used first
+    CHECK(used.find("{\"name\":\"Home\",\"clips\":1}") != std::string::npos); // on a clip, not on the list
+    CHECK(used.find("{\"name\":\"Penalty\",\"clips\":0}") != std::string::npos);
+    auto const renamed = call(*engine, "PUT", "/api/v1/tags", "{\"rename\":{\"from\":\"Goal\",\"to\":\"Tor\"}}");
+    CHECK(renamed.status == 200);
+    // Every clip tagged "goal" (any case), this one and an earlier one of this test.
+    CHECK_MESSAGE(renamed.body.find("\"renamed\":2}") != std::string::npos, renamed.body);
+    CHECK(engine->clip(id).tags == "Tor, Home");
+    CHECK(engine->tagList() == std::vector<std::string>{"Tor", "Save", "Penalty"});
+    CHECK(call(*engine, "PUT", "/api/v1/tags", "{\"rename\":{\"from\":\"Nope\",\"to\":\"X\"}}").status == 400);
+    CHECK(engine->exportConfigJson().find("\"tags\":[\"Tor\",\"Save\",\"Penalty\"]") != std::string::npos);
     CHECK(call(*engine, "DELETE", "/api/v1/playlists/" + pid).status == 200);
     CHECK(call(*engine, "DELETE", "/api/v1/playlists/" + pid).status == 404);
 

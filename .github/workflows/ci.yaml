@@ -26,7 +26,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            operator-ui/package-lock.json
 
       - name: Install CUDA toolkit
         run: |
@@ -53,6 +55,10 @@ jobs:
 
       - name: Build the web UI
         working-directory: web
+        run: npm ci --no-fund --no-audit && npm run build
+
+      - name: Build the operator screen
+        working-directory: operator-ui
         run: npm ci --no-fund --no-audit && npm run build
 
       - name: Build MXL

@@ -397,6 +397,26 @@ TEST_CASE("widgets: the list with CORS for listed origins, the pages with CSP fr
     CHECK(configOf().widgetFrameAncestors == "'self'");
 }
 
+TEST_CASE("the operator screen is served at /operator, with a note when it was not embedded")
+{
+    auto engine = engineIn("mxl-replay-operator-page");
+    HttpRequest request;
+    request.method = "GET";
+    request.path = "/operator";
+    auto const page = handleApi(*engine, request, "<html>replay</html>", "<html>operator</html>");
+    CHECK(page.status == 200);
+    CHECK(page.body == "<html>operator</html>");
+    CHECK(page.contentType.rfind("text/html", 0) == 0);
+    request.path = "/operator/";
+    CHECK(handleApi(*engine, request, "", "<html>operator</html>").body == "<html>operator</html>");
+    request.path = "/operator";
+    auto const missing = handleApi(*engine, request, "<html>replay</html>");
+    CHECK(missing.status == 200);
+    CHECK(missing.body.find("not embedded") != std::string::npos);
+    request.path = "/operator/x";
+    CHECK(handleApi(*engine, request, "", "<html>operator</html>").body != "<html>operator</html>");
+}
+
 TEST_CASE("a channel more than two grains late resyncs once, counted and logged at most every 10 s")
 {
     PlayoutGrid grid;

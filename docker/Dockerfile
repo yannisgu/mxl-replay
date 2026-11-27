@@ -13,6 +13,13 @@ RUN npm ci --no-fund --no-audit
 COPY web/ ./
 RUN npm run build
 
+FROM node:22-bookworm AS operatorui
+WORKDIR /operator-ui
+COPY operator-ui/package.json operator-ui/package-lock.json ./
+RUN npm ci --no-fund --no-audit
+COPY operator-ui/ ./
+RUN npm run build
+
 FROM ${CUDA_IMAGE} AS build
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 ARG NMOS_CPP_REF=fe303849527394b03bdedc8f161f377fe458bb62
@@ -56,6 +63,7 @@ RUN git init /opt/nmos-cpp \
 
 COPY . /src
 COPY --from=webui /web/dist /src/web/dist
+COPY --from=operatorui /operator-ui/dist /src/operator-ui/dist
 RUN cmake -S /src -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH="/opt/mxl;/tmp/mxl/build/vcpkg_installed/x64-linux" \
         -DREPLAY_WITH_NMOS=ON -DNMOS_CPP_DIR=/opt/nmos-cpp/Development \

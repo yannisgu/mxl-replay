@@ -449,9 +449,13 @@ HttpResponse channelCommand(Engine& engine, int channel, std::string const& acti
         {
             engine.stop(channel);
         }
+        else if (command == "uncue")
+        {
+            engine.uncue(channel);
+        }
         else
         {
-            return error(400, "command must be play, pause, stop or live");
+            return error(400, "command must be play, pause, stop, live or uncue");
         }
     }
     else if (action == "speed")
@@ -629,6 +633,13 @@ HttpResponse patchClip(Engine& engine, std::string const& id, Json const& body)
     fields.unsignedInt("in_ns", clip.inNs);
     fields.unsignedInt("out_ns", clip.outNs);
     fields.number("speed", clip.speed);
+    // Another angle: the same range on another camera (an upload's clip stays on the library).
+    std::int64_t camera = clip.camera;
+    if (fields.has("camera") && (!fields.integer("camera", camera) || camera < 1 || camera > engine.config().inputs || clip.camera == kLibraryCamera))
+    {
+        return error(400, clip.camera == kLibraryCamera ? "an upload's clip has no other camera" : "camera must be between 1 and " + std::to_string(engine.config().inputs));
+    }
+    clip.camera = static_cast<int>(camera);
     fields.string("colour", clip.colour);
     fields.string("tags", clip.tags);
     bool force = false; // a longer range at the protection cap
@@ -697,7 +708,7 @@ HttpResponse patchClip(Engine& engine, std::string const& id, Json const& body)
     return error(500, "unexpected clip edit result");
 }
 
-HttpResponse respond(Engine& engine, HttpRequest const& request, std::string const& indexHtml)
+HttpResponse respond(Engine& engine, HttpRequest const& request, std::string const& indexHtml, std::string const& operatorHtml)
 {
     auto const& path = request.path;
     auto const& method = request.method;
@@ -752,6 +763,14 @@ HttpResponse respond(Engine& engine, HttpRequest const& request, std::string con
         response.body = indexHtml.empty()
                             ? std::string("<!doctype html><title>MXL Replay</title><h1>MXL Replay</h1><p>API at /api/v1/status</p>")
                             : indexHtml;
+        return response;
+    }
+    if ((path == "/operator" || path == "/operator/") && (method.empty() || method == "GET"))
+    {
+        // The LSM operator screen (operator-ui/): one operator's channels, ?operator=<n>.
+        HttpResponse response;
+        response.contentType = "text/html; charset=utf-8";
+        response.body = operatorHtml.empty() ? std::string("<!doctype html><title>MXL Replay</title><p>The operator screen was not embedded.</p>") : operatorHtml;
         return response;
     }
     if (path == "/api/v1/preview/map" && method == "GET")
@@ -987,6 +1006,17 @@ HttpResponse respond(Engine& engine, HttpRequest const& request, std::string con
             }
             return json(200, std::string("{\"path\":\"") + jsonEscape(dir) + "\"}");
         }
+        if (action == "copy" && method == "POST")
+        {
+            std::string name;
+            fields.string("name", name);
+            auto const copy = engine.copyClip(id, name);
+            if (copy.empty())
+            {
+                return error(404, "unknown clip");
+            }
+            return json(201, clipJson(engine.clip(copy), engine.config()));
+        }
         if (action == "consolidate" && method == "POST")
         {
             std::string problem;
@@ -1012,6 +1042,59 @@ HttpResponse respond(Engine& engine, HttpRequest const& request, std::string con
         }
         auto const state = engine.shotClick(channel, id);
         return json(200, std::string("{\"state\":\"") + shotStateName(state) + "\"}");
+    }
+    // The shared tag list (docs/concepts/clip-tags.md). GET: every tag of the list or of a clip with the clips that
+    // have it, most used first. POST {"name"} adds one; PUT {"tags"} replaces the list; PUT {"rename":{"from","to"}}
+    // renames one on the list and on every clip.
+    if (path == "/api/v1/tags" && (method == "GET" || method == "POST" || method == "PUT"))
+    {
+        auto const answer = [&](std::string const& extra = {}) {
+            std::string out = "{\"tags\":[";
+            bool first = true;
+            for (auto const& use : engine.tagUse())
+            {
+                out += std::string(first ? "" : ",") + "{\"name\":\"" + jsonEscape(use.name) + "\",\"clips\":" + std::to_string(use.clips) + "}";
+                first = false;
+            }
+            return json(200, out + "]" + extra + "}");
+        };
+        std::string problem;
+        if (method == "POST")
+        {
+            std::string name;
+            fields.string("name", name);
+            if (!engine.addTag(name, problem))
+            {
+                return error(400, problem);
+            }
+        }
+        else if (method == "PUT")
+        {
+            if (auto const* rename = body.get("rename"))
+            {
+                Fields names(*rename);
+                std::string from;
+                std::string to;
+                if (rename->kind != Json::Kind::Object || !names.string("from", from) || !names.string("to", to))
+                {
+                    return error(400, "rename needs from and to");
+                }
+                int changed = 0;
+                if (!engine.renameTag(from, to, problem, changed))
+                {
+                    return error(400, problem);
+                }
+                return answer(",\"renamed\":" + std::to_string(changed));
+            }
+            auto const* tags = body.get("tags");
+            std::vector<std::string> list;
+            if (tags == nullptr || !readTagList(*tags, list, problem))
+            {
+                return error(400, tags == nullptr ? "tags or rename is needed" : problem);
+            }
+            engine.setTagList(list);
+        }
+        return answer();
     }
     if (path == "/api/v1/audio" && method == "GET")
     {
@@ -1157,19 +1240,16 @@ HttpResponse respond(Engine& engine, HttpRequest const& request, std::string con
             {
                 return error(fields.error().empty() ? 404 : 400, fields.error().empty() ? "unknown channel" : fields.error());
             }
-            ClipRef first;
-            for (auto const& entry : playlist.entries)
+            // `index` (optional, 0-based): from that entry instead of the first one that plays.
+            std::int64_t index = -1;
+            if (fields.has("index") && (!fields.integer("index", index) || index < 0 || index >= static_cast<std::int64_t>(playlist.entries.size())))
             {
-                if (first.id.empty())
-                {
-                    first = engine.clip(entry.clipId);
-                }
+                return error(400, fields.error().empty() ? "index must be an entry of the playlist" : fields.error());
             }
-            if (first.id.empty())
+            if (!engine.playPlaylist(channel, id, action == "play", static_cast<int>(index)))
             {
-                return error(400, "the playlist has no clip to play");
+                return error(400, index >= 0 ? "the entry's clip does not exist" : "the playlist has no clip to play");
             }
-            engine.playPlaylist(channel, id, action == "play");
             return json(200, engine.statusJson());
         }
         return error(404, "not found");
@@ -1239,9 +1319,9 @@ HttpResponse respond(Engine& engine, HttpRequest const& request, std::string con
 }
 } // namespace
 
-HttpResponse handleApi(Engine& engine, HttpRequest const& request, std::string const& indexHtml)
+HttpResponse handleApi(Engine& engine, HttpRequest const& request, std::string const& indexHtml, std::string const& operatorHtml)
 {
-    auto response = respond(engine, request, indexHtml);
+    auto response = respond(engine, request, indexHtml, operatorHtml);
     // A command (cue, play, speed, angle, mode) starts the flows of its next grains now, not at the next grain.
     if (request.method != "GET" && engine.bufferReady())
     {

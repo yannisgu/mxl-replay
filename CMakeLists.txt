@@ -45,6 +45,7 @@ add_library(replay-core STATIC
     src/playout/transition.cpp
     src/tally/tsl.cpp
     src/library/catalog.cpp
+    src/library/tags.cpp
     src/config/config.cpp
     src/domain/scan.cpp
     src/nmos/ids.cpp
@@ -138,12 +139,29 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html)
     )
     set(REPLAY_UI_SOURCE ${WEBUI_GENERATED})
 endif()
+# The LSM operator screen (operator-ui/, served at /operator), embedded the same way when it was built.
+set(REPLAY_OPERATOR_UI_SOURCE "")
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/operator-ui/dist/index.html)
+    set(OPERATOR_UI_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/ops/operator_ui_generated.hpp)
+    add_custom_command(
+        OUTPUT ${OPERATOR_UI_GENERATED}
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/operator-ui/dist/index.html -DOUTPUT=${OPERATOR_UI_GENERATED} -DVAR=operatorHtml
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFile.cmake
+        DEPENDS operator-ui/dist/index.html cmake/EmbedFile.cmake
+        COMMENT "Embedding the operator screen"
+    )
+    set(REPLAY_OPERATOR_UI_SOURCE ${OPERATOR_UI_GENERATED})
+endif()
 
-add_executable(mxl-replay src/main.cpp ${REPLAY_UI_SOURCE})
+add_executable(mxl-replay src/main.cpp ${REPLAY_UI_SOURCE} ${REPLAY_OPERATOR_UI_SOURCE})
 target_link_libraries(mxl-replay PRIVATE replay-core)
 target_compile_options(mxl-replay PRIVATE -Wall -Wextra -Wno-unused-parameter)
 if(REPLAY_UI_SOURCE)
     target_compile_definitions(mxl-replay PRIVATE REPLAY_HAS_UI=1)
+    target_include_directories(mxl-replay PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+endif()
+if(REPLAY_OPERATOR_UI_SOURCE)
+    target_compile_definitions(mxl-replay PRIVATE REPLAY_HAS_OPERATOR_UI=1)
     target_include_directories(mxl-replay PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 endif()
 if(mxl_FOUND)

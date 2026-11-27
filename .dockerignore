@@ -1,3 +1,4 @@
 build/
 web/node_modules/
 .git/
+operator-ui/node_modules/

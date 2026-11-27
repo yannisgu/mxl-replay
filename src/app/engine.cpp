@@ -1976,6 +1976,28 @@ void Engine::stop(int channel)
     runtime.shot.state = ShotState::Ended;
 }
 
+void Engine::uncue(int channel)
+{
+    std::lock_guard lock{mutex_};
+    if (channel < 1 || channel > static_cast<int>(channels_.size()))
+    {
+        return;
+    }
+    auto& runtime = channels_[static_cast<std::size_t>(channel - 1)];
+    if (runtime.liveMode)
+    {
+        return;
+    }
+    runtime.mix.active = false;
+    runtime.idle = false;
+    runtime.black = false;
+    runtime.clipId.clear();
+    runtime.playlistId.clear();
+    runtime.playlistIndex = -1;
+    runtime.shot.clipId.clear();
+    runtime.shot.state = runtime.scheduler.playing ? ShotState::Playing : ShotState::Paused;
+}
+
 bool Engine::setIdlePlaylist(int channel, std::string const& id, std::string& error)
 {
     std::lock_guard lock{mutex_};
@@ -2468,6 +2490,162 @@ bool Engine::deleteClip(std::string const& id)
     return true;
 }
 
+std::string Engine::copyClip(std::string const& id, std::string const& name)
+{
+    std::lock_guard lock{mutex_};
+    auto clip = catalog_.clip(id);
+    if (clip.id.empty())
+    {
+        return {};
+    }
+    clip.name = name.empty() ? clip.name + " (copy)" : name;
+    clip.id = "clip-" + std::to_string(clipSerial_++);
+    clip.groupId.clear();
+    catalog_.upsertClip(clip);
+    ++catalogVersion_;
+    // The same frames: one more protected range over them, so deleting either clip keeps the other's.
+    if (holdsRange(clip))
+    {
+        if (auto* ring = ringOf(clip.camera))
+        {
+            ring->protect(clip.inNs, clip.outNs);
+        }
+    }
+    return clip.id;
+}
+
+namespace
+{
+constexpr char const* kTagListKey = "tag_list";
+
+std::vector<std::string> storedTagList(Catalog const& catalog)
+{
+    auto const text = catalog.state(kTagListKey);
+    Json doc;
+    std::vector<std::string> tags;
+    std::string ignored;
+    if (text.empty() || !parseJson(text, doc) || !readTagList(doc, tags, ignored))
+    {
+        return defaultTagList();
+    }
+    return tags;
+}
+
+std::string tagListJson(std::vector<std::string> const& tags)
+{
+    std::string out = "[";
+    for (auto const& tag : tags)
+    {
+        out += (out.size() > 1 ? ",\"" : "\"") + jsonEscape(tag) + "\"";
+    }
+    return out + "]";
+}
+} // namespace
+
+std::vector<std::string> Engine::tagList() const
+{
+    std::lock_guard lock{mutex_};
+    return storedTagList(catalog_);
+}
+
+void Engine::setTagList(std::vector<std::string> const& tags)
+{
+    std::lock_guard lock{mutex_};
+    catalog_.setState(kTagListKey, tagListJson(tags));
+    ++catalogVersion_;
+}
+
+bool Engine::addTag(std::string const& name, std::string& error)
+{
+    auto const tag = cleanTag(name);
+    if (tag.empty())
+    {
+        error = "a tag is 1–40 characters without commas";
+        return false;
+    }
+    std::lock_guard lock{mutex_};
+    auto tags = storedTagList(catalog_);
+    if (std::none_of(tags.begin(), tags.end(), [&](std::string const& t) { return sameTag(t, tag); }))
+    {
+        tags.push_back(tag);
+        catalog_.setState(kTagListKey, tagListJson(tags));
+        ++catalogVersion_;
+    }
+    return true;
+}
+
+std::vector<Engine::TagUse> Engine::tagUse() const
+{
+    std::lock_guard lock{mutex_};
+    std::vector<TagUse> out;
+    auto const find = [&](std::string const& tag) {
+        return std::find_if(out.begin(), out.end(), [&](TagUse const& use) { return sameTag(use.name, tag); });
+    };
+    for (auto const& tag : storedTagList(catalog_))
+    {
+        out.push_back({tag, 0});
+    }
+    for (auto const& clip : catalog_.clips())
+    {
+        for (auto const& tag : splitTags(clip.tags))
+        {
+            if (auto it = find(tag); it != out.end())
+            {
+                ++it->clips;
+            }
+            else
+            {
+                out.push_back({tag, 1});
+            }
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](TagUse const& a, TagUse const& b) { return a.clips > b.clips; });
+    return out;
+}
+
+bool Engine::renameTag(std::string const& from, std::string const& to, std::string& error, int& changed)
+{
+    changed = 0;
+    auto const tag = cleanTag(to);
+    if (tag.empty())
+    {
+        error = "a tag is 1–40 characters without commas";
+        return false;
+    }
+    std::lock_guard lock{mutex_};
+    auto tags = storedTagList(catalog_);
+    bool found = false;
+    std::vector<std::string> renamed;
+    for (auto const& t : tags)
+    {
+        auto const name = sameTag(t, from) ? tag : t;
+        found = found || sameTag(t, from);
+        if (std::none_of(renamed.begin(), renamed.end(), [&](std::string const& r) { return sameTag(r, name); }))
+        {
+            renamed.push_back(name);
+        }
+    }
+    for (auto clip : catalog_.clips())
+    {
+        auto const tagsAfter = replay::renameTag(clip.tags, from, tag);
+        if (tagsAfter != clip.tags)
+        {
+            clip.tags = tagsAfter;
+            catalog_.upsertClip(clip);
+            ++changed;
+            found = true;
+        }
+    }
+    if (!found)
+    {
+        error = "no tag " + from;
+        return false;
+    }
+    catalog_.setState(kTagListKey, tagListJson(renamed));
+    ++catalogVersion_;
+    return true;
+}
+
 std::vector<ClipRef> Engine::clips() const
 {
     std::lock_guard lock{mutex_};
@@ -2689,19 +2867,32 @@ Catalog::Playlist Engine::playlist(std::string const& id) const
     return findPlaylist(catalog_, id);
 }
 
-void Engine::playPlaylist(int channel, std::string const& id, bool play)
+bool Engine::playPlaylist(int channel, std::string const& id, bool play, int from)
 {
     std::lock_guard lock{mutex_};
     if (channel < 1 || channel > static_cast<int>(channels_.size()))
     {
-        return;
+        return false;
     }
     auto const list = findPlaylist(catalog_, id);
     ClipRef clip;
-    int const first = firstPlayable(catalog_, list, clip);
+    int first = -1;
+    if (from >= 0)
+    {
+        if (from >= static_cast<int>(list.entries.size()))
+        {
+            return false;
+        }
+        clip = catalog_.clip(list.entries[static_cast<std::size_t>(from)].clipId);
+        first = clip.id.empty() ? -1 : from;
+    }
+    else
+    {
+        first = firstPlayable(catalog_, list, clip);
+    }
     if (first < 0)
     {
-        return;
+        return false;
     }
     auto& runtime = channels_[static_cast<std::size_t>(channel - 1)];
     runtime.playlistId = id;
@@ -2711,6 +2902,7 @@ void Engine::playPlaylist(int channel, std::string const& id, bool play)
     runtime.scheduler.playing = play;
     runtime.shot.clipId = id;
     runtime.shot.state = play ? ShotState::Playing : ShotState::Cued;
+    return true;
 }
 
 std::string Engine::upload(std::uint8_t const* data, std::size_t size, std::string const& name, std::string& error)
@@ -3169,7 +3361,7 @@ std::string Engine::exportConfigJson() const
         }
         out << "],\"aux\":" << auxJson(playlist.aux) << '}';
     }
-    out << "]}";
+    out << "],\"tags\":" << tagListJson(storedTagList(catalog_)) << '}';
     return out.str();
 }
 
@@ -3347,6 +3539,16 @@ Engine::ImportResult Engine::importConfigJson(std::string const& body)
             }
             catalog_.upsertPlaylist(playlist);
             ++catalogVersion_;
+        }
+        // The tag list, when the export has one that reads.
+        if (auto const* tags = doc.get("tags"); tags != nullptr)
+        {
+            std::vector<std::string> list;
+            std::string ignored;
+            if (readTagList(*tags, list, ignored))
+            {
+                catalog_.setState(kTagListKey, tagListJson(list));
+            }
         }
         continueSerial();
         result.ok = true;

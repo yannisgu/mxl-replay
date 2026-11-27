@@ -466,6 +466,16 @@ The flow step (1–5) is a module behind one interface:
   it starts again after its last entry. A cue, a play, live or a pause take the channel as
   before. Status per channel: `idle_playlist`, `idle` (it plays now); log `idle_playlist`.
 - Library search by name/tag/camera/time; thumbnails per clip.
+- **Tag list** (docs/concepts/clip-tags.md): the tags shared by every screen, no groups.
+  `GET /api/v1/tags` answers `{"tags":[{"name","clips"}]}`: every tag of the list or of a
+  clip with the clips that have it, most used first; `POST {"name"}` adds one (nothing when
+  it is there, any case); `PUT {"tags":[…]}` replaces the list (a tag is 1–40 characters
+  without commas, none twice, case-insensitive; 400 otherwise); `PUT
+  {"rename":{"from","to"}}` renames one on the list and on every clip (into an existing tag:
+  the two become one; answers `renamed`, the clips changed). Kept in the catalog
+  (`index.sqlite`) and the config export (`tags`); until one is stored the list is a default
+  (Goal, Chance, Save, Foul, Card, Offside, Corner, Free kick, Home, Away, Crowd, Coach).
+  Clips keep their `tags` as a comma list.
 
 ---
 
@@ -507,6 +517,103 @@ The flow step (1–5) is a module behind one interface:
 - Clip inspector: edit IN/OUT frame-accurately, speed, modes, end action, name,
   colour, tags.
 
+### 8.2a Operator screen (`/operator`)
+
+A second page, made for one operator at an LSM position: no navigation, one 1920×1080
+stage scaled to the screen (F: full screen). It is its own Vue 3 + TypeScript app in
+`operator-ui/`, embedded like the main UI when `operator-ui/dist/index.html` exists, and
+uses only the API of §8.5 and §8.9.
+
+- `GET /operator?operator=<n>` (default 1). With operators (§8.9) it shows that
+  operator's channels and control is the server's (`POST /api/v1/operators/{o}/control`);
+  on a server without operators it shows every channel and keeps control in the browser.
+- Top: one monitor per channel with its header (letter A, B, … in the operator's order,
+  label, a mode word: LIVE, CUED, PLAY, PAUSED, END or BUFFER; what it is on: playlist and
+  entry, clip, following live, or how far behind live). On the monitor, as plain text
+  without boxes: the camera top left, and at the bottom, small and half transparent, the
+  loaded clip's name with the time from its IN and to its OUT (source time; "+" once past
+  OUT, red in the last 5 s while it plays) and the speed while playing. An inner frame says
+  the mode (yellow cued, green playing a clip); the tally stays the outer border. The
+  channel's timecode is in the strip under the transport buttons.
+- No layout shifts: cueing, playing, uncueing, selecting or a speed change move nothing
+  else on the screen. A control that changes its words keeps the width of its longest one
+  (IN / Trim IN, OUT / Trim OUT / OUT · new clip, the mode word), one that comes and goes
+  keeps its place (*Save*, the OSD lines), the header has a fixed height, a clip's or an
+  entry's state tag sits on its thumbnail, and the selected clip's panel has one height
+  (its tags scroll sideways on one line). Only the timeline's contents move, when it zooms
+  to a clip.
+- Timers (timecodes, the time from IN and to OUT, the timeline's position, a clip's
+  progress) count frame by frame: each status push is applied when it arrives, and between
+  pushes the page carries a channel's position on from its speed, in whole frames, once per
+  house frame; a playing clip's estimate stops at its OUT until the push says what came next.
+  A push slightly behind what is shown (up to 3 frames) holds the display instead of stepping
+  it back; a larger jump shows at once. The pushes still carry every state change (another
+  screen, tally, a playlist's next entry, the end of a clip) and correct the estimate.
+  and a playback strip: the recent buffer (20 min, longer when the position or IN is
+  older; clip markers, IN–OUT range; click or drag seeks; with a clip or playlist entry
+  loaded, that clip and 10 s around it, its stored IN/OUT dashed), IN, OUT, Go IN, Go OUT,
+  back 5 s, Play/Pause, Live, the speed fader and the speeds 25–100 %. Red border:
+  the channel's tally is red. Blue header: the channel under control.
+- Speed fader, mouse only (no keys): 0–100 %, or 0–200 % with the *200%* setting (kept in
+  the browser; 0–100 % then keeps two thirds of the travel); snaps to 25, 33, 50, 75, 100 %
+  within ±2 % (Alt: no snapping); wheel ±1 % (Shift ±10 %); at most 20 speeds a second
+  while it moves. On a cued, paused or ended channel the first move plays, as a lever does.
+  When the speed differs from the loaded clip's (or playlist entry's), *Save … to clip*
+  (*to entry*) stores it, as an LSM's lever and ENTER.
+- Behringer X-Touch One (Web MIDI, Mackie Control mode; *X-Touch* in the tools, the page
+  reconnects it without a prompt) on the channel under control: fader speed (the motor
+  follows); wheel 1 frame, 5 frames or 1 s a detent (*Scrub* cycles); arrows select a clip
+  in the bin, the middle button cues it; Play play/pause, Stop pause, Record live; ◀◀ ▶▶
+  spool by steps of the position (2×, 5×, 10×, each press the next); Fader bank ◀ ▶ camera;
+  Channel ◀ ▶ control A/B; Marker IN, Nudge OUT; F1–F6 cameras 1–6, with the top REC held
+  7–12. The scribble strip shows channel, speed and camera or what a button did (red on air),
+  the timecode display the channel's timecode; LEDs show the state. `operator-ui/src/lib/xtouch.ts`.
+- *Uncue* in the header of a channel with a clip or playlist: transport command `uncue`
+  (`POST /api/v1/channels/{n}/transport {"command":"uncue"}`): the channel lets go of its clip
+  or playlist and stays where it is (a playing one plays on in the buffer, otherwise paused);
+  its marks stay but no longer edit the clip. A live channel is unchanged.
+- A camera (a tile, keys 1–9) on a channel with a clip loaded and its marks within 10 s of it
+  puts the clip on that camera too (`PATCH /api/v1/clips/{id} {"camera"}`: the same range on
+  the other angle, landing on its recorded frames, in every playlist with the clip).
+- OUT after an IN makes the clip and cues it on the channel, paused at its IN: IN,
+  OUT, Space plays it.
+- IN/OUT of a clip: with a clip (or playlist entry) loaded on the channel and the marks
+  within 10 s of it, IN and OUT are the clip's. Marking IN or OUT stores it in the clip at
+  once (`PATCH /api/v1/clips/{id}`), with no save step; the toast names the other playlists
+  that have the clip. OUT before IN is refused and the clip stays. Marks further from the
+  loaded clip are a new shot: the clip stays, and OUT makes and cues a new one. To change one entry only, *Make a copy* first (an entry of
+  the open playlist on a channel: a new clip from the channel's marks named
+  "<clip> (<playlist>)" with the clip's speed, colour, tags and end; the entry plays it and
+  is cued again at its IN). There is no separate *Clip* button or C key.
+- Every camera below, small. In JPEG mode with operators, the operator's synced pick at
+  the position of the channel under control (`multiview.cameras`); otherwise the live
+  pictures. A tile marks the operator's channels on that camera; a click sets the angle
+  on the channel under control.
+- Clip bin (newest first; each clip with its IN time, hh:mm:ss; filters by tag, search; the tag chips are the 8 most used tags,
+  several filter with AND; other tags through the search): a click selects, a double-click or
+  Enter cues on the channel under control (a shotbox click, not repeated on a clip
+  already cued there). Each clip's speed is a badge: a click opens the presets. Its ⋯ menu:
+  *Duplicate* (`…/copy`; the copy is selected) and *Delete* (a second click confirms; it
+  says which playlists have the clip, whose entries are then skipped, and which channels
+  have it loaded).
+- Under the bin, the **selected clip** (a click; the clip OUT made is selected): its name
+  (Enter or leaving the field renames it), camera, IN, length and speed, the channels it is
+  on; its tags (× removes), the 8 most used tags it does not have (+ adds), and a box that
+  lists the tags containing what is typed (↑/↓, Enter) or *Create* a new one, which joins
+  the shared list.
+- Sidebar: the open playlist (entries with state, drag clips in, reorder, remove, loop; while
+  dragging, a line with "Add here · n" or "Move here · n" shows where it lands, none where a
+  moved entry would stay, the dragged entry is dimmed and the list scrolls near its edges;
+  add the selected clip, cue on each channel) or, from the picker, the list of every
+  playlist in its place. Each entry's speed is a badge with the presets and *Clip* (the
+  clip's speed; dashed with a link while equal to it); *All speeds* sets every entry (an
+  LSM's "edit all"). A pill between two entries sets the transition into the second: cut,
+  or a mix of 12, 25, 50 or any 1–250 frames. A click opens an entry: its clip's IN/OUT,
+  end, auto-advance, *Cue on A/B* from that entry, *Make a copy* (when it is on a channel).
+  Entry edits read the playlist, change the entry and store all entries (`PUT`).
+- Keys on the channel under control: A/B and Tab control, 1–9 angle, Space, I/O, [ ],
+  L, P, Enter, ←/→ (Shift 1 s), F, ?; feedback appears on that channel's monitor.
+
 ### 8.3 Other pages
 
 Library (clips, uploads, conversion queue, export; audio items, 1.6.0), Playlists (per
@@ -528,10 +635,12 @@ REST under `/api/v1/…` (cameras, channels: transport/position/speed/angle, cli
 playlists, library, uploads, exports, config) and WebSocket `/api/v1/events`
 (positions, states, thumbnails at low rate, alarms) so several UIs stay in sync and
 other systems (e.g. a control surface or a vision mixer macro) can drive the replay.
-Clips are edited with `PATCH /api/v1/clips/{id}` and playlists read, replaced and
+Clips are edited with `PATCH /api/v1/clips/{id}` (also `camera`, one of the inputs; not for an upload's clip), duplicated with `POST /api/v1/clips/{id}/copy {"name"?}` (the
+same fields under a new id, named "<name> (copy)" by default, protecting the same range; deleting either keeps the
+other's) and playlists read, replaced and
 deleted at `/api/v1/playlists/{id}` (with the entries' transitions and the `aux` track, 1.6.0);
 audio items are listed at `/api/v1/audio` and renamed or deleted at `/api/v1/audio/{id}`; `POST /api/v1/playlists/{id}/play {"channel"}` plays one
-and `…/cue` cues its first clip, paused (a shotbox click on it then plays). Low-rate JPEG previews are served per channel,
+and `…/cue` cues its first clip, paused (a shotbox click on it then plays); both take an optional `index` (0-based) to start at that entry instead. Low-rate JPEG previews are served per channel,
 per camera and per clip (`…/preview.jpg`, `/api/v1/clips/{id}/thumbnail.jpg`; in the
 WebRTC mode of §8.6 only the clip thumbnails, and `/api/v1/preview/map`); the
 status carries the timecodes the UI shows (§5.5), formatted by the server.

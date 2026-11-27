@@ -37,6 +37,9 @@
 #ifdef REPLAY_HAS_UI
 #include "ops/webui_generated.hpp"
 #endif
+#ifdef REPLAY_HAS_OPERATOR_UI
+#include "ops/operator_ui_generated.hpp"
+#endif
 
 extern char** environ;
 
@@ -156,6 +159,10 @@ int main(int argc, char** argv)
 #ifdef REPLAY_HAS_UI
         indexHtml = std::string(replay::webui::indexHtml());
 #endif
+        std::string operatorHtml;
+#ifdef REPLAY_HAS_OPERATOR_UI
+        operatorHtml = std::string(replay::webui::operatorHtml());
+#endif
         // HTTP first: /livez answers while the retained segments are indexed (minutes for
         // hours of buffer); /readyz and the API answer 503 until the buffer is open.
         if (engine.config().webEnable)
@@ -180,7 +187,7 @@ int main(int argc, char** argv)
             uploads.started = replay::logUploadStarted;
             uploads.failed = replay::logUploadFailed;
             server.start(
-                engine.config().webPort, [&](replay::HttpRequest const& request) { return replay::handleApi(engine, request, indexHtml); }, uploads);
+                engine.config().webPort, [&](replay::HttpRequest const& request) { return replay::handleApi(engine, request, indexHtml, operatorHtml); }, uploads);
             replay::logInfo("web_listen", {{"port", std::to_string(server.port())}});
         }
         engine.openBuffer();

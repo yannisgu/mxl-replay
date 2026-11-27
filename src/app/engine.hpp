@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config/config.hpp"
+#include "library/tags.hpp"
 #include "flow/dis.hpp"
 #include "library/catalog.hpp"
 #include "media/convert.hpp"
@@ -114,6 +115,9 @@ public:
     void play(int channel);
     void pause(int channel);
     void live(int channel);
+    // Uncue: the channel lets go of its clip or playlist and stays where it is (a playing channel plays on in the
+    // buffer, otherwise paused). Its marks stay. A live channel is unchanged.
+    void uncue(int channel);
     // Stop (SPECIFICATION.md §7): the channel's idle playlist plays (a paused one resumes); without one the shot
     // ends where it stands (Ended, paused). A live channel without an idle playlist stays live.
     void stop(int channel);
@@ -149,6 +153,24 @@ public:
     ClipEdit updateClip(ClipRef clip, bool force = false);
     // False when the id is unknown.
     bool deleteClip(std::string const& id);
+    // A new clip with the clip's fields (not its group), named `name` or "<name> (copy)", protecting the same range.
+    // Empty when the id is unknown.
+    std::string copyClip(std::string const& id, std::string const& name = {});
+    // The shared tag list (docs/concepts/clip-tags.md), kept in the catalog; the default list until one is stored.
+    [[nodiscard]] std::vector<std::string> tagList() const;
+    void setTagList(std::vector<std::string> const& tags);
+    // Adds a tag to the list (nothing when it is there, any case). False with `error` when it is not a tag.
+    bool addTag(std::string const& name, std::string& error);
+    // Every tag of the list or of a clip, with the clips that have it: most used first, then in list order.
+    struct TagUse
+    {
+        std::string name;
+        int clips = 0;
+    };
+    [[nodiscard]] std::vector<TagUse> tagUse() const;
+    // Renames a tag on the list and on every clip that has it (into an existing tag: the two become one). False with
+    // `error` when `to` is not a tag or `from` is on neither. `changed`: the clips renamed.
+    bool renameTag(std::string const& from, std::string const& to, std::string& error, int& changed);
     [[nodiscard]] std::vector<ClipRef> clips() const;
     // Empty id when unknown.
     [[nodiscard]] ClipRef clip(std::string const& id) const;
@@ -172,8 +194,9 @@ public:
     [[nodiscard]] std::vector<Catalog::Playlist> playlists() const;
     // Empty id when unknown.
     [[nodiscard]] Catalog::Playlist playlist(std::string const& id) const;
-    // Plays the playlist from its first clip that exists; `play` false cues it there (paused, shot Cued).
-    void playPlaylist(int channel, std::string const& id, bool play = true);
+    // Plays the playlist from its first clip that exists, or from entry `from` (0-based) when it is one whose
+    // clip exists; `play` false cues it there (paused, shot Cued). False when there is nothing to play.
+    bool playPlaylist(int channel, std::string const& id, bool play = true, int from = -1);
 
     // A clip ("upload-N"), or an audio item ("audio-N") for a file with audio and no video.
     std::string upload(std::uint8_t const* data, std::size_t size, std::string const& name, std::string& error);

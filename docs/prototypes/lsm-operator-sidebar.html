@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LSM Operator · Sidebar</title>
+<!--
+  Prototype of the LSM v2 operator screen. Mock data only, no API.
+  One 1920x1080 stage, scaled to fit its container (inline) or the screen (full screen, key F).
+  Layout: the operator's LSM channels on top, each with a small playback strip below it;
+  a mosaic of every camera, synced to the channel under control; clips at the bottom.
+  Variant: the playlist takes the whole right-hand sidebar.
+
+  Colour rules: red is the on-air tally and nothing else. Blue marks the channel under control
+  (the one the keys, the angle tiles and the clip bin act on). Green plays, yellow is cued.
+  Cameras are told apart by number, clips by a small category swatch.
+-->
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121922; --panel2: #18212c; --sunk: #0a0f15; --border: #243142; --border2: #34455a;
+    --text: #d7e0ea; --muted: #8597ab; --accent: #4da3ff; --accent-tint: rgba(77,163,255,.16);
+    --ok: #3fb968; --cue: #e8c33a; --warn: #e0a83a; --tally: #ff3b30; --tally-fill: #cc2418; --chip: #1e2a38;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); }
+  ::selection { background: var(--accent); color: #031426; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  * { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+  #wrap { position: relative; width: 100%; overflow: hidden; background: var(--bg); border-radius: 6px; }
+  #wrap:fullscreen { border-radius: 0; }
+  #stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0;
+    display: grid; grid-template-columns: 1fr 460px; grid-template-rows: 552px 132px 1fr; gap: 10px; padding: 10px; background: var(--bg); }
+  #channels, #cams, #bottom { grid-column: 1; }
+  #side { grid-column: 2; grid-row: 1 / 4; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  svg.i { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; flex: none; }
+  svg.i.fill { fill: currentColor; stroke: none; }
+  .tc { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- LSM channels ---------- */
+  #channels { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-height: 0; }
+  .ch { display: grid; grid-template-rows: auto 1fr auto; background: var(--panel); border: 3px solid var(--border);
+    border-radius: 8px; overflow: hidden; min-height: 0; }
+  .ch.onair { border-color: var(--tally); }
+  .ch-head { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--panel2); font-size: 14px; cursor: pointer;
+    transition: background-color .15s ease-out; }
+  .ch.active .ch-head { background: var(--accent-tint); }
+  .letter { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; font-weight: 800; font-size: 14px;
+    border: 1px solid var(--border2); color: var(--muted); }
+  .ch.active .letter { background: var(--accent); border-color: var(--accent); color: #031426; }
+  .ch-name { font-weight: 700; font-size: 16px; }
+  .ch-head .spacer { flex: 1; }
+  .ch-head .on { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ch-head .on b { color: var(--text); font-weight: 600; }
+  .ch.active .ch-head .on { color: #b3c1d0; }
+  .mon { position: relative; background: #000; min-height: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .mon canvas { height: 100%; aspect-ratio: 16/9; display: block; max-width: 100%; }
+  .osd { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: flex-end;
+    padding: 8px 12px; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  .osd .big { font-size: 30px; font-weight: 600; }
+  .osd .speed { font-size: 30px; font-weight: 700; }
+  .angle { position: absolute; left: 12px; top: 10px; font-weight: 700; font-size: 15px; padding: 3px 10px; border-radius: 4px;
+    background: rgba(0,0,0,.66); color: #fff; }
+  .countdown { position: absolute; right: 12px; top: 10px; font-size: 22px; font-weight: 700; padding: 2px 10px; border-radius: 4px; background: rgba(0,0,0,.66); }
+  .countdown.red { background: var(--tally-fill); color: #fff; }
+  .toast { position: absolute; left: 50%; bottom: 56px; transform: translate(-50%, 6px); background: rgba(18,25,34,.94); border: 1px solid var(--border2);
+    padding: 7px 14px; border-radius: 6px; font-size: 14px; opacity: 0; pointer-events: none; white-space: nowrap;
+    transition: opacity .18s ease-out, transform .18s cubic-bezier(.2,.8,.2,1); }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.warn { border-color: var(--warn); color: var(--warn); }
+
+  /* playback strip under each monitor */
+  .pb { display: grid; grid-template-columns: auto 1fr; grid-template-areas: "tl tl" "l r"; gap: 6px 10px; align-items: start; padding: 8px 10px; border-top: 1px solid var(--border); }
+  .pb .tl { grid-area: tl; }
+  .pb > div:last-child { grid-area: r; justify-self: end; display: flex; gap: 8px; align-items: center; }
+  .pb > div:last-child .speeds { margin-top: 0; }
+  .btns { display: flex; gap: 4px; }
+  .b { display: inline-flex; align-items: center; justify-content: center; gap: 5px; background: var(--chip); border: 1px solid var(--border);
+    border-radius: 5px; height: 30px; padding: 0 9px; font-size: 13px; font-weight: 600; min-width: 36px; transition: border-color .12s, background-color .12s; }
+  .b:hover { border-color: var(--muted); }
+  .b:active { background: var(--panel2); }
+  .b.on { background: var(--accent); border-color: var(--accent); color: #031426; }
+  .b.play.on { background: var(--ok); border-color: var(--ok); color: #06140b; }
+  .b.livebtn.on { background: var(--text); border-color: var(--text); color: var(--bg); }
+  .b kbd { font: 600 11px var(--mono); color: var(--muted); }
+  .b.on kbd { color: inherit; opacity: .7; }
+  .tl { position: relative; height: 36px; background: var(--sunk); border: 1px solid var(--border); border-radius: 5px; cursor: ew-resize; overflow: hidden; }
+  .tl .clipm { position: absolute; top: 0; height: 6px; border-radius: 0 0 2px 2px; background: var(--muted); opacity: .8; }
+  .tl .range { position: absolute; top: 8px; bottom: 14px; background: var(--accent-tint); border: 1px solid var(--accent); border-radius: 2px; }
+  .tl .head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; }
+  .tl .ticks { position: absolute; inset: auto 0 0 0; height: 13px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  .tl .ticks span { position: absolute; bottom: 0; transform: translateX(-50%); }
+  .tl .ticks span:first-child { transform: none; }
+  .speeds { display: flex; gap: 3px; margin-top: 4px; }
+  .speeds .b { min-width: 0; padding: 0 7px; }
+  .marks { font-size: 12px; color: var(--muted); display: flex; gap: 10px; margin-top: 5px; }
+  .marks b { color: var(--text); font-weight: 500; }
+
+  /* ---------- camera mosaic ---------- */
+  #cams { display: grid; grid-template-columns: 160px repeat(8, 1fr); gap: 8px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px; min-height: 0; }
+  .cams-info { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); padding: 2px 2px 0 4px; }
+  .cams-info .sync { color: var(--text); font-size: 13px; font-weight: 600; }
+  .cams-info .sync span { color: var(--accent); }
+  .cams-info .tc { color: var(--text); font-size: 16px; }
+  .health { font-size: 11px; }
+  .health { display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: auto; }
+  .health .okdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 4px; vertical-align: 1px; }
+  .tools { display: flex; gap: 4px; margin-top: 4px; }
+  .tools .b { height: 26px; font-size: 12px; padding: 0 8px; }
+  .cam { position: relative; border-radius: 5px; overflow: hidden; border: 2px solid transparent; cursor: pointer; background: #000;
+    display: flex; flex-direction: column; align-self: start; transition: border-color .12s; }
+  .cam:hover { border-color: var(--border2); }
+  .cam canvas { width: 100%; aspect-ratio: 16/9; display: block; }
+  .cam .lbl { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 3px 6px; background: var(--panel2); }
+  .cam .lbl .num { font: 700 12px var(--mono); color: var(--text); background: var(--chip); border: 1px solid var(--border2); border-radius: 3px; padding: 0 5px; }
+  .cam.sel { border-color: var(--accent); }
+  .cam .tag { position: absolute; left: 5px; top: 5px; display: flex; gap: 3px; }
+  .cam .tag b { font-size: 11px; font-weight: 800; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 3px;
+    background: rgba(0,0,0,.66); color: #fff; border: 1px solid rgba(255,255,255,.5); }
+  .cam .tag b.act { background: var(--accent); border-color: var(--accent); color: #031426; }
+  .cam .tag b.air { box-shadow: 0 0 0 2px var(--tally); }
+
+  /* ---------- clips and playlists ---------- */
+  #bottom { display: grid; min-height: 0; }
+  .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: grid; grid-template-rows: auto 1fr; min-height: 0; overflow: hidden; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 13px; min-height: 44px; }
+  .pane-head h2 { margin: 0 6px 0 0; font-size: 13px; font-weight: 700; color: var(--text); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; background: var(--chip); border: 1px solid var(--border); border-radius: 99px; padding: 3px 11px; font-size: 12px; }
+  .chip:hover { border-color: var(--muted); }
+  .chip.on { background: var(--accent-tint); border-color: var(--accent); color: var(--text); }
+  .pane-head .spacer { flex: 1; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .hint b { color: var(--accent); font-weight: 600; }
+  .search { background: var(--sunk); border: 1px solid var(--border); border-radius: 5px; color: var(--text); padding: 5px 8px; font-size: 12px; width: 170px; }
+  .search::placeholder { color: var(--muted); }
+  .bin { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 4px 6px; padding: 8px; overflow-y: auto; align-content: start; }
+  .clip { position: relative; display: grid; grid-template-columns: 64px 1fr auto; gap: 8px; align-items: center; height: 44px;
+    padding: 3px 7px 3px 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; cursor: pointer; user-select: none;
+    transition: border-color .12s, background-color .12s; }
+  .clip:hover { border-color: var(--muted); }
+  .clip.sel { border-color: var(--accent); background: var(--accent-tint); }
+  .clip.sel .meta .s, .clip.sel .meta .n .id, .clip.sel .badge { color: #b3c1d0; }
+  .clip.cued { border-color: var(--cue); }
+  .clip.playing { border-color: var(--ok); }
+  .clip canvas { width: 64px; height: 36px; border-radius: 2px; display: block; }
+  .clip .meta { min-width: 0; font-size: 12px; line-height: 1.3; }
+  .clip .meta .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .clip .meta .n .id { font: 600 11px var(--mono); color: var(--muted); margin-right: 5px; }
+  .clip .meta .s { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: 0; }
+  .clip .r { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11px; }
+  .clip .badge { font-weight: 700; color: var(--muted); }
+  .clip .chtag { font-size: 11px; font-weight: 700; padding: 0 5px; border-radius: 3px; }
+  .clip.cued .chtag { background: var(--cue); color: #1d1600; }
+  .clip.playing .chtag { background: var(--ok); color: #06140b; }
+  .clip .prog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--ok); }
+  .clip.new { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { background: rgba(77,163,255,.4); } }
+
+  .pl { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  #side { display: grid; grid-template-rows: 1fr; }
+  .plbar { display: flex; gap: 6px; padding: 10px 10px 4px; }
+  .plpick { flex: 1; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px 0 12px; font: 700 15px system-ui, sans-serif;
+    background: var(--chip); border: 1px solid var(--border2); border-radius: 5px; text-align: left; min-width: 0; }
+  .plpick:hover { border-color: var(--muted); }
+  .plpick span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .plpick svg { color: var(--muted); }
+  .pl[hidden], .pls[hidden] { display: none; }
+  .pls { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  .pls-t { align-self: center; font-size: 15px; font-weight: 700; }
+  .plist { overflow-y: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .plrow { display: grid; grid-template-columns: 112px 1fr auto; gap: 10px; align-items: center; padding: 6px; border: 1px solid transparent; border-radius: 6px;
+    background: none; text-align: left; }
+  .plrow:hover { background: var(--panel2); border-color: var(--border2); }
+  .plrow.cur { border-color: var(--accent); background: var(--accent-tint); }
+  .plrow .stack { position: relative; width: 112px; height: 54px; }
+  .plrow .stack canvas { position: absolute; width: 80px; height: 45px; border-radius: 3px; border: 1px solid var(--bg); }
+  .plrow .stack canvas:nth-child(1) { left: 0; top: 0; z-index: 3; }
+  .plrow .stack canvas:nth-child(2) { left: 16px; top: 4px; z-index: 2; opacity: .85; }
+  .plrow .stack canvas:nth-child(3) { left: 32px; top: 8px; z-index: 1; opacity: .7; }
+  .plrow .nm { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .plrow .sub { font-size: 12px; color: var(--muted); }
+  .plrow.cur .sub { color: #b3c1d0; }
+  .plrow .st { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 3px; }
+  .plrow .st.play { background: var(--ok); color: #06140b; } .plrow .st.cue { background: var(--cue); color: #1d1600; }
+  .plbar .b { height: 36px; }
+  .entries { overflow-y: auto; padding: 6px 8px; }
+  .entries.drop { background: var(--accent-tint); outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .entry { display: grid; grid-template-columns: 20px 80px 1fr auto 28px; gap: 8px; align-items: center; padding: 5px 6px; border-radius: 5px;
+    font-size: 12px; border: 1px solid transparent; cursor: grab; }
+  .entry:hover { background: var(--panel2); }
+  .entry.onair { border-color: var(--ok); background: rgba(63,185,104,.08); }
+  .entry .i { color: var(--muted); font-family: var(--mono); text-align: right; }
+  .entry canvas { width: 80px; height: 45px; border-radius: 3px; display: block; }
+  .entry .rt { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; font-size: 12px; }
+  .entry .rt .sub { color: var(--muted); font-size: 11px; }
+  .entry .n { font-size: 13px; }
+  .entry .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entry .n small { display: block; color: var(--muted); font-weight: 400; }
+  .entry .tr { color: var(--muted); }
+  .entry .st { font-size: 11px; font-weight: 700; }
+  .entry .st.air { color: var(--ok); } .entry .st.next { color: var(--muted); }
+  .entry .x { display: grid; place-items: center; width: 26px; height: 26px; background: none; border: 1px solid transparent; border-radius: 4px; color: var(--muted); }
+  .entry .x:hover { color: var(--text); border-color: var(--border2); }
+  .pl-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-items: center; padding: 10px; border-top: 1px solid var(--border); font-size: 12px; }
+  .pl-foot .total { grid-column: 1 / -1; }
+  .pl-foot #addsel { grid-column: 1 / -1; }
+  .pl-foot .b { height: 36px; }
+  .pl-foot .total { color: var(--muted); margin-right: auto; }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px; text-align: center; }
+
+  /* key overlay */
+  #keys { position: absolute; inset: 0; background: rgba(5,8,12,.82); display: grid; place-items: center; z-index: 10; }
+  #keys[hidden] { display: none; }
+  #keys .card { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 24px 30px; display: grid; grid-template-columns: repeat(3, auto); gap: 6px 48px; font-size: 16px; }
+  #keys h3 { grid-column: 1 / -1; margin: 0 0 10px; font-size: 18px; }
+  #keys div { display: flex; gap: 12px; align-items: center; }
+  #keys kbd { font: 700 14px var(--mono); min-width: 52px; text-align: center; padding: 3px 7px; border: 1px solid var(--border2); border-radius: 5px; background: var(--chip); box-shadow: 0 1px 0 rgba(0,0,0,.5); }
+  #keys p { grid-column: 1 / -1; margin: 12px 0 0; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M11 6l-7 6 7 6M20 6l-7 6 7 6"/></symbol>
+  <symbol id="i-goin" viewBox="0 0 24 24"><path d="M5 5v14M19 12H9m4-4l-4 4 4 4"/></symbol>
+  <symbol id="i-goout" viewBox="0 0 24 24"><path d="M19 5v14M5 12h10m-4-4l4 4-4 4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-loop" viewBox="0 0 24 24"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  <symbol id="i-keys" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+</svg>
+<div id="wrap">
+  <div id="stage">
+    <section id="channels"></section>
+    <section id="cams"></section>
+    <section id="bottom">
+      <div class="pane">
+        <div class="pane-head">
+          <h2>Clips</h2>
+          <span id="filters"></span>
+          <span class="spacer"></span>
+          <span class="hint" id="binhint"></span>
+          <input class="search" id="search" placeholder="Search name or tag" />
+        </div>
+        <div class="bin" id="bin"></div>
+      </div>
+    </section>
+    <aside id="side" class="pane">
+        <div class="pls" id="pls" hidden>
+          <div class="plbar"><button class="b" id="plback" title="Back (Esc)"><svg class="i"><use href="#i-left"/></svg></button><span class="pls-t">Playlists</span></div>
+          <div class="plist" id="plist"></div>
+          <div class="pl-foot"><button class="b" id="newpl" style="grid-column:1/-1"><svg class="i"><use href="#i-plus"/></svg>New playlist</button></div>
+        </div>
+        <div class="pl" id="plview">
+          <div class="plbar">
+            <button class="plpick" id="plpick" title="All playlists"><svg class="i"><use href="#i-list"/></svg><span id="plname"></span><svg class="i"><use href="#i-right"/></svg></button>
+            <button class="b" id="loopbtn" title="Loop the playlist"><svg class="i"><use href="#i-loop"/></svg>Loop</button>
+          </div>
+          <div class="entries" id="entries"></div>
+          <div class="pl-foot">
+            <span class="total" id="pltotal"></span>
+            <button class="b" id="addsel"><svg class="i"><use href="#i-plus"/></svg>Add selected clip <kbd>P</kbd></button>
+            <button class="b" id="plA">Cue on A</button>
+            <button class="b" id="plB">Cue on B</button>
+          </div>
+        </div>
+    </aside>
+    <div id="keys" hidden>
+      <div class="card">
+        <h3>Keys</h3>
+        <div><kbd>A</kbd><kbd>B</kbd> take control of a channel</div>
+        <div><kbd>Space</kbd> play / pause</div>
+        <div><kbd>I</kbd><kbd>O</kbd> mark IN / OUT</div>
+        <div><kbd>Tab</kbd> next channel</div>
+        <div><kbd>L</kbd> back to live (E2E)</div>
+        <div><kbd>C</kbd> create clip from IN–OUT</div>
+        <div><kbd>1–8</kbd> camera angle</div>
+        <div><kbd>← →</kbd> one frame (Shift: 1 s)</div>
+        <div><kbd>Enter</kbd> cue selected clip</div>
+        <div><kbd>F</kbd> full screen</div>
+        <div><kbd>[ ]</kbd> go to IN / OUT</div>
+        <div><kbd>P</kbd> add clip to playlist</div>
+        <p>Keys, angle tiles and the clip bin act on the channel under control (blue). Red is on air.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------- model (mock)
+const FPS = 50;
+const T0 = Date.now() / 1000;               // wall clock of "now" at load
+const TC0 = 14 * 3600 + 32 * 60 + 10;       // time of day at load
+const now = () => Date.now() / 1000 - T0;   // seconds, 0 = load; the buffer reaches back 41 min
+
+const CAMS = ["Wide", "Tight", "Reverse", "High 18m", "Iso 7", "Goal L", "Handheld", "Steadicam"];
+// clip categories: hues kept away from tally red, cue yellow, play green and the control blue
+const TAGS = { goal: "#e879b9", chance: "#f2955a", foul: "#b8956a", "set piece": "#5cc8d6", save: "#9d8cf0", var: "#8a99ab", bench: "#8a99ab", atmos: "#8a99ab" };
+const channels = [
+  { label: "LSM A", key: "A", cam: 1, pos: -12, speed: 0.5, playing: true, live: false, inN: null, outN: null, clip: null, onair: true },
+  { label: "LSM B", key: "B", cam: 0, pos: 0, speed: 1, playing: true, live: true, inN: null, outN: null, clip: null, onair: false },
+];
+let active = 0;
+
+let nextId = 101;
+const clips = [];
+function addClip(c) { const clip = { id: nextId++, tags: [], speed: 0.5, ...c }; clips.unshift(clip); return clip; }
+[
+  { name: "Tackle midfield", cam: 1, inN: -1830, outN: -1822, tags: ["foul"], speed: 0.5 },
+  { name: "Corner kick 23'", cam: 0, inN: -1500, outN: -1490, tags: ["set piece"], speed: 1 },
+  { name: "Save, reverse", cam: 2, inN: -1210, outN: -1204, tags: ["save"], speed: 0.33 },
+  { name: "Shot wide 31'", cam: 3, inN: -860, outN: -853, tags: ["chance"], speed: 0.5 },
+  { name: "Goal 37' tight", cam: 1, inN: -520, outN: -511, tags: ["goal"], speed: 0.5 },
+  { name: "Goal 37' goal cam", cam: 5, inN: -521, outN: -512, tags: ["goal"], speed: 0.5 },
+  { name: "Celebration", cam: 6, inN: -505, outN: -490, tags: ["goal"], speed: 1 },
+  { name: "Header wide 39'", cam: 0, inN: -400, outN: -393, tags: ["chance"], speed: 0.5 },
+  { name: "Offside check", cam: 3, inN: -360, outN: -355, tags: ["var"], speed: 0.25 },
+  { name: "Coach reaction", cam: 4, inN: -300, outN: -294, tags: ["bench"], speed: 1 },
+  { name: "Yellow card 41'", cam: 1, inN: -250, outN: -244, tags: ["foul"], speed: 0.5 },
+  { name: "Free kick wall", cam: 7, inN: -200, outN: -192, tags: ["set piece"], speed: 0.5 },
+  { name: "Free kick, keeper", cam: 5, inN: -199, outN: -192, tags: ["set piece", "save"], speed: 0.33 },
+  { name: "Crowd 44'", cam: 6, inN: -150, outN: -140, tags: ["atmos"], speed: 1 },
+  { name: "Counter attack", cam: 0, inN: -110, outN: -96, tags: ["chance"], speed: 0.75 },
+  { name: "Post! reverse", cam: 2, inN: -60, outN: -54, tags: ["chance"], speed: 0.33 },
+].sort((a, b) => a.inN - b.inN).forEach(addClip);
+let selected = clips[0].id;
+const clipById = (id) => clips.find((c) => c.id === id);
+
+const playlists = [
+  { name: "Goal 37'", loop: false, entries: [] },
+  { name: "Half-time", loop: false, entries: [] },
+];
+const byName = (n) => clips.find((c) => c.name === n).id;
+playlists[0].entries = ["Goal 37' tight", "Goal 37' goal cam", "Celebration"].map((n, i) => ({ clip: byName(n), tr: i ? "Mix 12" : "Cut" }));
+playlists.push(
+  { name: "Fouls first half", loop: false, entries: ["Tackle midfield", "Yellow card 41'"].map((n, i) => ({ clip: byName(n), tr: i ? "Mix 12" : "Cut" })) },
+  { name: "Chances", loop: false, entries: ["Shot wide 31'", "Header wide 39'", "Counter attack", "Post! reverse"].map((n, i) => ({ clip: byName(n), tr: i ? "Mix 12" : "Cut" })) },
+  { name: "Atmosphere", loop: true, entries: ["Crowd 44'", "Celebration"].map((n, i) => ({ clip: byName(n), tr: "Mix 50" })) },
+);
+playlists[1].entries = ["Corner kick 23'", "Save, reverse", "Shot wide 31'", "Goal 37' tight", "Coach reaction"].map((n, i) => ({ clip: byName(n), tr: i ? "Mix 25" : "Cut" }));
+let plSel = 0;
+
+// ---------------------------------------------------------------- picture (synthetic match, same moment from 8 angles)
+function world(t) {
+  const ball = { x: 50 + 34 * Math.sin(t * 0.21) + 9 * Math.sin(t * 0.9), y: 30 + 19 * Math.sin(t * 0.31 + 1) + 4 * Math.sin(t * 1.7) };
+  const players = [];
+  for (let i = 0; i < 16; i++) {
+    const home = { x: 12 + (i % 8) * 11, y: 12 + Math.floor(i / 8) * 34 + (i % 3) * 4 };
+    const pull = 0.35 + 0.25 * Math.sin(i);
+    players.push({
+      x: home.x + (ball.x - home.x) * pull + 3 * Math.sin(t * (0.8 + i * 0.07) + i),
+      y: home.y + (ball.y - home.y) * pull + 3 * Math.cos(t * (0.7 + i * 0.05) + i * 2),
+      team: i % 2,
+    });
+  }
+  return { ball, players };
+}
+// each camera: a view of the 100x60 pitch: centre, zoom, mirror, tilt, shake
+function view(cam, t, w) {
+  switch (cam) {
+    case 0: return { cx: 50, cy: 30, z: 1, flip: false };
+    case 1: return { cx: w.ball.x, cy: w.ball.y, z: 3.2, flip: false };
+    case 2: return { cx: 100 - (50 + (w.ball.x - 50) * 0.6), cy: 30, z: 1.5, flip: true };
+    case 3: return { cx: 50, cy: 30, z: 0.95, flip: false, rot: Math.PI / 2 };
+    case 4: { const p = w.players[7]; return { cx: p.x, cy: p.y, z: 5, flip: false }; }
+    case 5: return { cx: 8, cy: 30, z: 2.6, flip: false };
+    case 6: return { cx: w.ball.x + 2 * Math.sin(t * 7), cy: w.ball.y + 1.5 * Math.cos(t * 9), z: 2.2, flip: false };
+    case 7: return { cx: (w.ball.x + 50) / 2, cy: w.ball.y * 0.8 + 6, z: 1.9, flip: false };
+  }
+}
+function tcString(t) {
+  let f = Math.floor((TC0 + t) * FPS);
+  const fr = f % FPS; f = Math.floor(f / FPS);
+  const s = f % 60, m = Math.floor(f / 60) % 60, h = Math.floor(f / 3600) % 24;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(h)}:${p(m)}:${p(s)}:${p(fr)}`;
+}
+function draw(ctx, cam, t) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const w = world(t), v = view(cam, t, w);
+  ctx.save();
+  ctx.fillStyle = "#1d3a22"; ctx.fillRect(0, 0, W, H);
+  const k = (W / 110) * v.z;
+  ctx.translate(W / 2, H / 2);
+  if (v.rot) ctx.rotate(v.rot);
+  ctx.scale(v.flip ? -k : k, k);
+  ctx.translate(-v.cx, -v.cy);
+  for (let i = 0; i < 10; i++) { ctx.fillStyle = i % 2 ? "#2a5a31" : "#2f6536"; ctx.fillRect(i * 10, 0, 10, 60); }
+  ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 0.35;
+  ctx.strokeRect(0, 0, 100, 60); ctx.beginPath(); ctx.moveTo(50, 0); ctx.lineTo(50, 60); ctx.stroke();
+  ctx.beginPath(); ctx.arc(50, 30, 9, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeRect(0, 16, 15, 28); ctx.strokeRect(85, 16, 15, 28); ctx.strokeRect(0, 25, 5, 10); ctx.strokeRect(95, 25, 5, 10);
+  ctx.fillStyle = "#ddd"; ctx.fillRect(-1.5, 26.5, 1.5, 7); ctx.fillRect(100, 26.5, 1.5, 7);
+  for (const p of w.players) {
+    ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(p.x + 0.4, p.y + 0.5, 1.1, 0.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = p.team ? "#f1f1f1" : "#d6332b"; ctx.beginPath(); ctx.arc(p.x, p.y, 1.1, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(w.ball.x, w.ball.y, 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  if (cam === 6) { ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fillRect(0, 0, W, H * 0.08); ctx.fillRect(0, H * 0.92, W, H * 0.08); }
+}
+
+// ---------------------------------------------------------------- DOM
+const $ = (s, el = document) => el.querySelector(s);
+const h = (tag, attrs = {}, html = "") => { const e = document.createElement(tag); Object.assign(e, attrs); if (html) e.innerHTML = html; return e; };
+const icon = (id) => `<svg class="i fill"><use href="#i-${id}"/></svg>`;
+const sicon = (id) => `<svg class="i"><use href="#i-${id}"/></svg>`;
+const fmtDur = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, "0")}`; };
+const fmtSpeed = (s) => `${Math.round(s * 100)}%`;
+const SPEEDS = [0.25, 0.33, 0.5, 0.75, 1];
+
+// feedback appears on the monitor of the channel it concerns, where the operator is looking
+function toast(i, msg, warn = false) {
+  const t = $(".toast", chEls[i]); t.textContent = msg; t.classList.toggle("warn", warn); t.classList.add("show");
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+const chEls = channels.map((ch, i) => {
+  const el = h("div", { className: "ch" });
+  el.innerHTML = `
+    <div class="ch-head" title="Take control (${ch.key})">
+      <span class="letter">${ch.key}</span><span class="ch-name">${ch.label}</span>
+      <span class="on"></span>
+      <span class="spacer"></span>
+    </div>
+    <div class="mon"><canvas width="960" height="540"></canvas>
+      <div class="angle"></div><div class="countdown tc" hidden></div>
+      <div class="osd"><span class="big tc pos"></span><span class="speed tc"></span></div>
+      <div class="toast"></div>
+    </div>
+    <div class="pb">
+      <div>
+        <div class="btns">
+          <button class="b" data-a="in" title="Mark IN (I)">IN <kbd>I</kbd></button>
+          <button class="b" data-a="out" title="Mark OUT (O)">OUT <kbd>O</kbd></button>
+          <button class="b" data-a="goin" title="Go to IN ([)">${sicon("goin")}</button>
+          <button class="b" data-a="goout" title="Go to OUT (])">${sicon("goout")}</button>
+          <button class="b" data-a="clip" title="Create clip from IN to OUT (C)">${sicon("plus")}Clip <kbd>C</kbd></button>
+        </div>
+        <div class="marks"></div>
+      </div>
+      <div class="tl"><div class="range" hidden></div><div class="head"></div><div class="ticks"></div></div>
+      <div>
+        <div class="btns">
+          <button class="b" data-a="back" title="Back 5 s">${sicon("back")}</button>
+          <button class="b play" data-a="play" title="Play / pause (Space)"></button>
+          <button class="b livebtn" data-a="live" title="Back to live (L)">LIVE <kbd>L</kbd></button>
+        </div>
+        <div class="speeds">${SPEEDS.map((s) => `<button class="b" data-s="${s}">${fmtSpeed(s)}</button>`).join("")}</div>
+      </div>
+    </div>`;
+  // only the header and the monitor take control; a button acts on its own channel without moving control
+  $(".ch-head", el).addEventListener("click", () => setActive(i));
+  $(".mon", el).addEventListener("click", () => setActive(i));
+  el.querySelectorAll("[data-a]").forEach((b) => b.addEventListener("click", () => act(i, b.dataset.a)));
+  el.querySelectorAll("[data-s]").forEach((b) => b.addEventListener("click", () => { const c = channels[i]; c.speed = +b.dataset.s; c.live = false; c.playing = true; }));
+  const tl = $(".tl", el);
+  const scrub = (e) => {
+    const r = tl.getBoundingClientRect(); const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const c = channels[i]; c.live = false; c.playing = false; c.clip = null; c.pos = now() - TL_SPAN * (1 - f);
+  };
+  tl.addEventListener("pointerdown", (e) => { tl.setPointerCapture(e.pointerId); scrub(e); tl.onpointermove = scrub; });
+  tl.addEventListener("pointerup", () => (tl.onpointermove = null));
+  $(".mon", el).addEventListener("wheel", (e) => { e.preventDefault(); jog(i, (e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 1 : 1 / FPS)); }, { passive: false });
+  const ticks = $(".ticks", tl);
+  for (let m = 20; m >= 0; m -= 5) { const s = h("span", { textContent: m ? `−${m}′` : "" }); s.style.left = `${100 - m * 5}%`; ticks.append(s); }
+  $("#channels").append(el);
+  return el;
+});
+const TL_SPAN = 20 * 60; // the timeline shows the last 20 minutes
+
+// camera mosaic
+const camInfo = h("div", { className: "cams-info" });
+camInfo.innerHTML = `<div class="sync">Angles at <span id="syncch"></span></div><div class="tc" id="synctc"></div>
+  <div class="health"><span><span class="okdot"></span>REC 8/8</span><span>Buffer 41 min</span><span>63 % used</span><span>GPU 38 %</span></div>
+  <div class="tools"><button class="b" id="keysbtn" title="Keys (?)">${sicon("keys")}Keys</button><button class="b" id="fsbtn" title="Full screen (F)">${sicon("full")}</button></div>`;
+$("#cams").append(camInfo);
+const camEls = CAMS.map((name, i) => {
+  const el = h("div", { className: "cam", title: `Angle ${i + 1} on the channel under control` });
+  el.innerHTML = `<canvas width="320" height="180"></canvas><span class="tag"></span>
+    <div class="lbl"><span class="num">${i + 1}</span>${name}</div>`;
+  el.addEventListener("click", () => setAngle(i));
+  $("#cams").append(el);
+  return el;
+});
+
+function setActive(i) { active = i; renderBinHint(); }
+function setAngle(cam) {
+  const c = channels[active]; c.cam = cam; c.clip = null;
+  toast(active, `Angle ${cam + 1} · ${CAMS[cam]}`);
+}
+function jog(i, d) { const c = channels[i]; c.live = false; c.playing = false; c.clip = null; c.pos = Math.min(now(), c.pos + d); }
+function act(i, a) {
+  const c = channels[i];
+  if (a === "in") c.inN = c.pos;
+  if (a === "out") c.outN = c.pos;
+  if (a === "goin") { if (c.inN == null) return toast(i, "No IN mark yet", true); c.live = false; c.playing = false; c.pos = c.inN; }
+  if (a === "goout") { if (c.outN == null) return toast(i, "No OUT mark yet", true); c.live = false; c.playing = false; c.pos = c.outN; }
+  if (a === "play") { if (c.live) { c.live = false; c.playing = false; } else c.playing = !c.playing; }
+  if (a === "live") { c.live = true; c.playing = true; c.speed = 1; c.clip = null; }
+  if (a === "back") { c.live = false; c.pos -= 5; }
+  if (a === "clip") createClip(i);
+}
+function createClip(i) {
+  const c = channels[i];
+  if (c.inN == null || c.outN == null) return toast(i, `Mark ${c.inN == null ? "IN" : "OUT"} first, then C`, true);
+  if (c.outN <= c.inN) return toast(i, "OUT is before IN: mark OUT again", true);
+  const clip = addClip({ name: `${CAMS[c.cam]} ${tcString(c.inN).slice(0, 8)}`, cam: c.cam, inN: c.inN, outN: c.outN, speed: c.speed === 1 ? 0.5 : c.speed });
+  selected = clip.id; c.inN = c.outN = null;
+  renderBin(clip.id); toast(i, `Clip ${clip.id} created`);
+}
+function cueClip(i, clip, playlist = null, index = 0) {
+  const c = channels[i];
+  c.live = false; c.playing = false; c.cam = clip.cam; c.pos = clip.inN; c.speed = clip.speed;
+  c.clip = { id: clip.id, playlist, index };
+}
+// one click selects; Enter or a double-click cues on the channel under control; Space then plays
+function cueSelected() {
+  const clip = clipById(selected); if (!clip) return;
+  const c = channels[active];
+  if (c.clip && c.clip.id === clip.id && !c.clip.playlist && !c.playing) { c.playing = true; return; }
+  cueClip(active, clip); toast(active, `Clip ${clip.id} cued · Space plays`);
+}
+
+// clip bin
+let filter = "all";
+const FILTERS = [["all", "All"], ["goal", "Goal"], ["chance", "Chance"], ["foul", "Foul"], ["set piece", "Set piece"]];
+$("#filters").append(...FILTERS.map(([k, l]) => { const b = h("button", { className: "chip", textContent: l }); b.dataset.f = k; b.onclick = () => { filter = k; renderBin(); }; return b; }));
+$("#search").addEventListener("input", () => renderBin());
+function renderBinHint() { $("#binhint").innerHTML = `Double-click or Enter cues on <b>${channels[active].label}</b>`; }
+const thumbs = new Map();
+function thumb(clip, w = 128, hgt = 72) {
+  const key = `${clip.id}:${w}`;
+  if (!thumbs.has(key)) { const cv = h("canvas", { width: w, height: hgt }); draw(cv.getContext("2d"), clip.cam, clip.inN); thumbs.set(key, cv); }
+  const cv = thumbs.get(key); const copy = h("canvas", { width: cv.width, height: cv.height }); copy.getContext("2d").drawImage(cv, 0, 0); return copy;
+}
+const tagLine = (clip) => clip.tags.map((t) => `<span class="sw" style="background:${TAGS[t]}"></span>${t}`).join(" · ");
+const clipEls = new Map();
+function renderBin(flashId) {
+  document.querySelectorAll("#filters .chip").forEach((b) => b.classList.toggle("on", b.dataset.f === filter));
+  const q = $("#search").value.trim().toLowerCase();
+  const bin = $("#bin"); bin.innerHTML = ""; clipEls.clear();
+  for (const clip of clips) {
+    if (filter !== "all" && !clip.tags.includes(filter)) continue;
+    if (q && !(clip.id + " " + clip.name + " " + clip.tags.join(" ")).toLowerCase().includes(q)) continue;
+    const el = h("div", { className: "clip" + (clip.id === selected ? " sel" : "") + (clip.id === flashId ? " new" : ""), draggable: true });
+    el.append(thumb(clip));
+    el.insertAdjacentHTML("beforeend", `<span class="prog" style="width:0"></span>
+      <div class="meta"><div class="n"><span class="id">${clip.id}</span>${clip.name}</div><div class="s">${clip.cam + 1} ${CAMS[clip.cam]}${clip.tags.length ? " · " + tagLine(clip) : ""}</div></div>
+      <div class="r"><span class="tc">${fmtDur((clip.outN - clip.inN) / clip.speed)}</span><span class="chtag" hidden></span><span class="badge">${fmtSpeed(clip.speed)}</span></div>`);
+    el.onclick = () => { selected = clip.id; renderBin(); };
+    el.ondblclick = () => { selected = clip.id; cueSelected(); renderBin(); };
+    el.ondragstart = (e) => { e.dataTransfer.setData("text/clip", String(clip.id)); };
+    bin.append(el); clipEls.set(clip.id, el);
+  }
+  if (!bin.children.length) bin.innerHTML = `<div class="empty" style="grid-column:1/-1">No clip matches. Clear the search or pick All.</div>`;
+}
+
+// playlists
+function renderPl() {
+  $("#plname").textContent = playlists[plSel].name;
+  const pl = playlists[plSel];
+  $("#loopbtn").classList.toggle("on", pl.loop);
+  const box = $("#entries"); box.innerHTML = "";
+  if (!pl.entries.length) box.innerHTML = `<div class="empty">Drag clips here, or select a clip and press P.</div>`;
+  let total = 0;
+  pl.entries.forEach((en, idx) => {
+    const clip = clipById(en.clip); if (!clip) return;
+    const d = (clip.outN - clip.inN) / clip.speed; total += d;
+    const row = h("div", { className: "entry", draggable: true, title: "Double-click: cue this entry on the channel under control" });
+    row.dataset.idx = idx;
+    row.innerHTML = `<span class="i">${idx + 1}</span>`;
+    row.append(thumb(clip));
+    row.insertAdjacentHTML("beforeend", `<span class="n">${clip.name}<small>${clip.id} · ${clip.cam + 1} ${CAMS[clip.cam]}</small></span>
+      <span class="rt"><span class="tc">${fmtDur(d)}</span><span class="sub">${fmtSpeed(clip.speed)} · ${en.tr}</span><span class="st"></span></span>
+      <button class="x" title="Remove from playlist">${sicon("x")}</button>`);
+    $(".x", row).onclick = () => { pl.entries.splice(idx, 1); renderPl(); };
+    row.ondragstart = (e) => e.dataTransfer.setData("text/entry", String(idx));
+    row.ondblclick = () => cueClip(active, clip, plSel, idx);
+    box.append(row);
+  });
+  $("#pltotal").innerHTML = `${pl.entries.length} entries · <span class="tc">${fmtDur(total)}</span>${pl.loop ? " · loops" : ""}`;
+}
+const entries = $("#entries");
+entries.addEventListener("dragover", (e) => { e.preventDefault(); entries.classList.add("drop"); });
+entries.addEventListener("dragleave", () => entries.classList.remove("drop"));
+entries.addEventListener("drop", (e) => {
+  e.preventDefault(); entries.classList.remove("drop");
+  const pl = playlists[plSel];
+  const rows = [...entries.querySelectorAll(".entry")];
+  let at = rows.findIndex((r) => e.clientY < r.getBoundingClientRect().top + r.getBoundingClientRect().height / 2);
+  if (at < 0) at = pl.entries.length;
+  const cid = e.dataTransfer.getData("text/clip"), eid = e.dataTransfer.getData("text/entry");
+  if (cid) pl.entries.splice(at, 0, { clip: +cid, tr: at ? "Mix 12" : "Cut" });
+  else if (eid !== "") { const [m] = pl.entries.splice(+eid, 1); pl.entries.splice(at > +eid ? at - 1 : at, 0, m); }
+  renderPl();
+});
+const addSelected = () => { playlists[plSel].entries.push({ clip: selected, tr: playlists[plSel].entries.length ? "Mix 12" : "Cut" }); renderPl(); };
+$("#addsel").onclick = addSelected;
+// the playlist picker replaces the sidebar with the list of playlists; picking one goes back
+const plDur = (pl) => pl.entries.reduce((t, en) => { const c = clipById(en.clip); return t + (c ? (c.outN - c.inN) / c.speed : 0); }, 0);
+function showPlaylists(show) {
+  $("#pls").hidden = !show; $("#plview").hidden = show;
+  if (show) renderPlaylists();
+}
+function renderPlaylists() {
+  const box = $("#plist"); box.innerHTML = "";
+  playlists.forEach((pl, i) => {
+    const row = h("button", { className: "plrow" + (i === plSel ? " cur" : "") });
+    const stack = h("div", { className: "stack" });
+    pl.entries.slice(0, 3).forEach((en) => { const c = clipById(en.clip); if (c) stack.append(thumb(c, 160, 90)); });
+    row.append(stack);
+    const ch = channels.find((c) => c.clip && c.clip.playlist === i);
+    row.insertAdjacentHTML("beforeend", `<div style="min-width:0"><div class="nm">${pl.name}</div>
+      <div class="sub">${pl.entries.length ? `${pl.entries.length} clips · <span class="tc">${fmtDur(plDur(pl))}</span>` : "Empty"}${pl.loop ? " · loops" : ""}</div></div>
+      <span>${ch ? `<span class="st ${ch.playing ? "play" : "cue"}">${ch.key} ${ch.playing ? "PLAY" : "CUED"}</span>` : ""}</span>`);
+    row.onclick = () => { plSel = i; renderPl(); showPlaylists(false); };
+    box.append(row);
+  });
+}
+$("#plpick").onclick = () => showPlaylists(true);
+$("#plback").onclick = () => showPlaylists(false);
+$("#loopbtn").onclick = () => { playlists[plSel].loop = !playlists[plSel].loop; renderPl(); };
+$("#newpl").onclick = () => { playlists.push({ name: `Playlist ${playlists.length + 1}`, loop: false, entries: [] }); plSel = playlists.length - 1; renderPl(); showPlaylists(false); };
+const cuePl = (i) => { const pl = playlists[plSel]; const en = pl.entries[0]; if (!en) return; cueClip(i, clipById(en.clip), plSel, 0); toast(i, `${pl.name} cued · Space plays`); };
+$("#plA").onclick = () => cuePl(0); $("#plB").onclick = () => cuePl(1);
+
+// ---------------------------------------------------------------- keys and full screen
+const keysEl = $("#keys");
+const toggleKeys = (show = keysEl.hidden) => { keysEl.hidden = !show; };
+$("#keysbtn").onclick = () => toggleKeys();
+keysEl.onclick = () => toggleKeys(false);
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") { if (e.key === "Escape") e.target.blur(); return; }
+  const k = e.key.toLowerCase();
+  if (k === "?" ) return toggleKeys();
+  if (k === "escape") { toggleKeys(false); showPlaylists(false); return; }
+  if (k === "a" || k === "b") setActive(k === "a" ? 0 : 1);
+  else if (k === "tab") { e.preventDefault(); setActive((active + 1) % channels.length); }
+  else if (/^[1-8]$/.test(k)) setAngle(+k - 1);
+  else if (k === " ") { e.preventDefault(); act(active, "play"); }
+  else if (k === "enter") { e.preventDefault(); cueSelected(); }
+  else if (k === "i") act(active, "in");
+  else if (k === "o") act(active, "out");
+  else if (k === "[") act(active, "goin");
+  else if (k === "]") act(active, "goout");
+  else if (k === "c") createClip(active);
+  else if (k === "l") act(active, "live");
+  else if (k === "p") addSelected();
+  else if (k === "arrowleft" || k === "arrowright") { e.preventDefault(); jog(active, (k === "arrowleft" ? -1 : 1) * (e.shiftKey ? 1 : 1 / FPS)); }
+  else if (k === "f") toggleFs();
+});
+function toggleFs() { if (document.fullscreenElement) document.exitFullscreen(); else $("#wrap").requestFullscreen?.(); }
+$("#fsbtn").onclick = toggleFs;
+function fit() {
+  const wrap = $("#wrap"), stage = $("#stage");
+  const fs = document.fullscreenElement === wrap;
+  const W = fs ? window.innerWidth : wrap.clientWidth, H = fs ? window.innerHeight : Infinity;
+  const s = Math.min(W / 1920, H / 1080);
+  stage.style.transform = `scale(${s})`;
+  if (fs) { stage.style.left = `${(W - 1920 * s) / 2}px`; stage.style.top = `${(H - 1080 * s) / 2}px`; wrap.style.height = ""; }
+  else { stage.style.left = stage.style.top = "0"; wrap.style.height = `${Math.round(1080 * s)}px`; }
+}
+new ResizeObserver(fit).observe(document.body);
+document.addEventListener("fullscreenchange", fit);
+
+// ---------------------------------------------------------------- loop
+let last = performance.now() / 1000, frame = 0;
+function tick() {
+  const tnow = performance.now() / 1000, dt = Math.min(0.1, tnow - last); last = tnow; frame++;
+  const n = now();
+  channels.forEach((c, i) => {
+    if (c.live) c.pos = n - 0.08;
+    else if (c.playing) {
+      c.pos = Math.min(n, c.pos + dt * c.speed);
+      const clip = c.clip && clipById(c.clip.id);
+      if (clip && c.pos >= clip.outN) {
+        const pl = c.clip.playlist != null ? playlists[c.clip.playlist] : null;
+        let next = pl ? c.clip.index + 1 : null;
+        if (pl && next >= pl.entries.length && pl.loop) next = 0;
+        if (pl && next < pl.entries.length) { cueClip(i, clipById(pl.entries[next].clip), c.clip.playlist, next); c.playing = true; }
+        else { c.pos = clip.outN; c.playing = false; }
+      }
+    }
+    const el = chEls[i];
+    el.classList.toggle("active", i === active);
+    el.classList.toggle("onair", c.onair);
+    draw($("canvas", el).getContext("2d"), c.cam, c.pos);
+    const clip = c.clip && clipById(c.clip.id);
+    const pl = clip && c.clip.playlist != null ? playlists[c.clip.playlist] : null;
+    $(".on", el).innerHTML = clip ? (pl ? `<b>${pl.name}</b> ${c.clip.index + 1}/${pl.entries.length} · ${clip.name}` : `<b>${clip.id} ${clip.name}</b>`)
+      : c.live ? "following live" : `${fmtDur(n - c.pos)} behind live`;
+    $(".angle", el).textContent = `${c.cam + 1} · ${CAMS[c.cam]}`;
+    $(".pos", el).textContent = tcString(c.pos);
+    $(".speed", el).textContent = c.playing && !c.live ? fmtSpeed(c.speed) : "";
+    const cd = $(".countdown", el);
+    if (clip) { const rem = (clip.outN - c.pos) / c.speed; cd.hidden = false; cd.textContent = `−${fmtDur(rem)}`; cd.classList.toggle("red", c.playing && rem < 5); }
+    else cd.hidden = true;
+    const len = c.inN != null && c.outN != null && c.outN > c.inN ? ` · <b class="tc">${fmtDur(c.outN - c.inN)}</b>` : "";
+    $(".marks", el).innerHTML = `IN <b class="tc">${c.inN != null ? tcString(c.inN) : "--:--:--:--"}</b> OUT <b class="tc">${c.outN != null ? tcString(c.outN) : "--:--:--:--"}</b>${len}`;
+    const pb = $('[data-a="play"]', el), playing = c.playing && !c.live;
+    if (pb._p !== playing) { pb.innerHTML = playing ? icon("pause") : icon("play"); pb._p = playing; }
+    pb.classList.toggle("on", playing);
+    $('[data-a="live"]', el).classList.toggle("on", c.live);
+    el.querySelectorAll("[data-s]").forEach((b) => b.classList.toggle("on", !c.live && Math.abs(+b.dataset.s - c.speed) < 0.001));
+    // timeline
+    const tl = $(".tl", el), x = (t) => `${(100 * (1 - (n - t) / TL_SPAN)).toFixed(3)}%`;
+    $(".head", tl).style.left = x(c.pos);
+    const r = $(".range", tl);
+    if (c.inN != null) { r.hidden = false; r.style.left = x(c.inN); r.style.width = `calc(${x(c.outN != null && c.outN > c.inN ? c.outN : c.pos)} - ${x(c.inN)})`; } else r.hidden = true;
+    if (frame % 25 === 1) {
+      tl.querySelectorAll(".clipm").forEach((m) => m.remove());
+      for (const cl of clips) {
+        if (n - cl.inN > TL_SPAN) continue;
+        const m = h("div", { className: "clipm", title: `${cl.id} ${cl.name}` });
+        m.style.left = x(cl.inN); m.style.width = `max(3px, calc(${x(cl.outN)} - ${x(cl.inN)}))`;
+        if (cl.tags[0]) m.style.background = TAGS[cl.tags[0]];
+        tl.prepend(m);
+      }
+    }
+  });
+  // cameras: every angle at the position of the channel under control
+  const ac = channels[active];
+  $("#syncch").textContent = ac.label;
+  $("#synctc").textContent = tcString(ac.pos);
+  camEls.forEach((el, i) => {
+    if (frame % 2 === 0) draw($("canvas", el).getContext("2d"), i, ac.pos);
+    el.classList.toggle("sel", ac.cam === i);
+    $(".tag", el).innerHTML = channels.map((c, ci) => (c.cam === i ? `<b class="${ci === active ? "act" : ""} ${c.onair ? "air" : ""}">${c.key}</b>` : "")).join("");
+  });
+  // clip states
+  clipEls.forEach((el, id) => {
+    let on = -1; channels.forEach((c, ci) => { if (c.clip && c.clip.id === id) on = ci; });
+    const c = channels[on]; const clip = clipById(id);
+    el.classList.toggle("cued", on >= 0 && !c.playing);
+    el.classList.toggle("playing", on >= 0 && c.playing);
+    const tag = $(".chtag", el); tag.hidden = on < 0; if (on >= 0) tag.textContent = c.label;
+    $(".badge", el).hidden = on >= 0;
+    $(".prog", el).style.width = on >= 0 ? `${(100 * (c.pos - clip.inN) / (clip.outN - clip.inN)).toFixed(1)}%` : "0";
+  });
+  document.querySelectorAll("#entries .entry").forEach((row) => {
+    const idx = +row.dataset.idx;
+    const ch = channels.find((c) => c.clip && c.clip.playlist === plSel && c.clip.index === idx);
+    const nx = channels.find((c) => c.clip && c.clip.playlist === plSel && c.clip.index + 1 === idx);
+    row.classList.toggle("onair", !!ch);
+    const st = $(".st", row);
+    st.className = "st" + (ch ? " air" : nx ? " next" : "");
+    st.textContent = ch ? `${ch.key} ${ch.playing ? "PLAY" : "CUED"}` : nx ? "NEXT" : "";
+  });
+  requestAnimationFrame(tick);
+}
+renderBin(); renderPl(); renderBinHint(); fit();
+channels[0].inN = channels[0].pos - 2; // a mark in progress on LSM A
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

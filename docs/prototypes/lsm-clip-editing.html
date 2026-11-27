@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LSM Clip Editing</title>
+<!--
+  Clickable prototype for docs/concepts/clip-speed-and-entry-editing.md. Mock data and a simulated channel, no API.
+  - The speed fader under the monitor (mouse only: drag, wheel, presets). Range 0–100 %, 0–200 % in the settings.
+  - Speed as on an EVS LSM: the fader is the lever; "Save 42 % to clip/entry" is its ENTER. Quick presets: click the
+    speed badge on a clip or an entry; "All speeds" in the playlist head sets every entry (EVS "Edit all").
+  - The playlist in the sidebar: a click opens an entry (speed that follows its clip or its own, end, auto-advance,
+    Make a copy for this entry); the pills between entries set cut or mix (frames).
+  - IN/OUT of a clip or entry: cue it on A; its IN/OUT become A's marks. Scrub (timeline, wheel on the monitor, ←/→),
+    press IN / OUT (I, O) as always, then "Update clip", "Copy for this entry" or "Revert" in the bar that appears.
+  Edits apply to a cued shot at once; a playing shot keeps what it was cued with ("applies at the next cue").
+  Colour rules as on the operator screen: red is the tally only, blue is control/selection, green plays, yellow is cued.
+-->
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121922; --panel2: #18212c; --sunk: #0a0f15; --border: #243142; --border2: #34455a;
+    --text: #d7e0ea; --muted: #8597ab; --muted-on-tint: #b3c1d0; --accent: #4da3ff; --accent-tint: rgba(77,163,255,.16);
+    --ok: #3fb968; --cue: #e8c33a; --warn: #e0a83a; --tally: #ff3b30; --tally-fill: #cc2418; --chip: #1e2a38;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); font-size: 13px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  * { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .tc { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+
+  #stage { display: grid; gap: 10px; padding: 10px; height: 100dvh;
+    grid-template-columns: minmax(0, 1fr) clamp(360px, 28vw, 460px); grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "top side" "ch side" "bin side"; }
+  @media (max-width: 1099px) {
+    #stage { height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; grid-template-areas: "top" "ch" "bin" "side"; }
+    #bin, #side { max-height: 80dvh; min-height: 420px; }
+  }
+
+  /* top bar */
+  #top { grid-area: top; display: flex; align-items: center; gap: 12px; padding: 2px 2px 0; flex-wrap: wrap; }
+  #top h1 { font-size: 14px; margin: 0; font-weight: 700; }
+  #top .note { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .seg button { background: var(--chip); border: 0; padding: 4px 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.on { background: var(--accent); color: #031426; }
+
+  /* buttons */
+  .b { display: inline-flex; align-items: center; justify-content: center; gap: 5px; background: var(--chip); border: 1px solid var(--border);
+    border-radius: 5px; height: 30px; padding: 0 9px; font-size: 13px; font-weight: 600; min-width: 34px; transition: border-color .12s, background-color .12s; }
+  .b:hover:not(:disabled) { border-color: var(--muted); }
+  .b:disabled { opacity: .45; cursor: default; }
+  .b.on { background: var(--accent); border-color: var(--accent); color: #031426; }
+  .b.play.on { background: var(--ok); border-color: var(--ok); color: #06140b; }
+  .b.live.on { background: var(--text); border-color: var(--text); color: var(--bg); }
+  .b.sm { height: 26px; font-size: 12px; padding: 0 7px; min-width: 28px; }
+  .b.ghost { background: transparent; }
+  .b.save { border-color: var(--accent); color: var(--accent); }
+  .link { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; font-weight: 600; }
+  .link:hover { text-decoration: underline; }
+  svg.i { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; flex: none; }
+  svg.i.fill { fill: currentColor; stroke: none; }
+
+  /* channel */
+  #ch { grid-area: ch; display: grid; grid-template-columns: minmax(0, 1fr); background: var(--panel); border: 3px solid var(--border); border-radius: 8px; overflow: hidden; }
+  #ch.onair { border-color: var(--tally); }
+  .ch-head { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--accent-tint); font-size: 14px; min-width: 0; }
+  .letter { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; font-weight: 800; background: var(--accent); color: #031426; flex: none; }
+  .ch-name { font-weight: 700; font-size: 16px; white-space: nowrap; }
+  .what { color: var(--muted-on-tint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .what b { color: var(--text); }
+  .mon { position: relative; background: #000; display: grid; place-items: center; height: min(40dvh, calc((100vw - 520px) * 9 / 16 / 2 + 120px)); min-height: 200px; }
+  .mon canvas { position: absolute; inset: 0; margin: auto; height: 100%; width: auto; max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; display: block; object-fit: contain; }
+  .angle { position: absolute; left: 12px; top: 10px; font-weight: 700; font-size: 14px; padding: 3px 10px; border-radius: 4px; background: rgba(0,0,0,.66); }
+  .countdown { position: absolute; right: 12px; top: 10px; font-size: 20px; font-weight: 700; padding: 2px 10px; border-radius: 4px; background: rgba(0,0,0,.66); }
+  .countdown.red { background: var(--tally-fill); }
+  .mixbadge { position: absolute; right: 12px; top: 46px; font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,.66); color: var(--cue); }
+  .osd { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: flex-end; padding: 8px 12px; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  .osd .big { font-size: 26px; font-weight: 600; }
+  .osd .speed { font-size: 26px; font-weight: 700; }
+  .toast { position: absolute; left: 50%; bottom: 18%; transform: translateX(-50%); background: rgba(18,25,34,.94); border: 1px solid var(--border2);
+    padding: 7px 14px; border-radius: 6px; font-size: 14px; pointer-events: none; opacity: 0; transition: opacity .18s; max-width: 90%; text-align: center; }
+  .toast.show { opacity: 1; }
+  .toast.warn { border-color: var(--warn); color: var(--warn); }
+
+  .pb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px; border-top: 1px solid var(--border); }
+  .pb .btns { display: flex; gap: 4px; }
+  .pb .fwrap { flex: 1 1 360px; display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .presets { display: flex; gap: 3px; }
+  .presets .b { padding: 0 6px; min-width: 0; }
+
+  /* timeline and marks */
+  .tl { position: relative; flex-basis: 100%; height: 26px; background: var(--sunk); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; touch-action: none; user-select: none; }
+  .tl .orig { position: absolute; top: 3px; bottom: 3px; border: 1px dashed var(--muted); border-radius: 3px; pointer-events: none; }
+  .tl .mk { position: absolute; top: 0; bottom: 0; background: var(--accent-tint); pointer-events: none; }
+  .tl .mi, .tl .mo { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+  .tl .ph { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); pointer-events: none; }
+  .tl .lbl { position: absolute; bottom: 2px; font: 600 9px var(--mono); color: var(--muted); pointer-events: none; }
+  .marks { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .marks b { color: var(--text); font-weight: 500; }
+  .marksbar { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-tint); font-size: 12px; }
+  .marksbar .warn { color: var(--warn); }
+  kbd { font: 600 11px var(--mono); color: var(--muted); }
+
+  /* fader */
+  .fader { position: relative; flex: 1; min-width: 160px; height: 34px; cursor: ew-resize; touch-action: none; user-select: none; }
+  .fader .track { position: absolute; left: 0; right: 0; top: 9px; height: 6px; border-radius: 3px; background: var(--sunk); border: 1px solid var(--border2); }
+  .fader .fill { position: absolute; left: 0; top: 9px; height: 6px; border-radius: 3px; background: var(--accent); opacity: .85; }
+  .fader .tick { position: absolute; top: 18px; width: 1px; height: 5px; background: var(--border2); }
+  .fader .tick span { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); font: 600 10px var(--mono); color: var(--muted); white-space: nowrap; }
+  .fader .tick.hundred { background: var(--muted); height: 7px; }
+  .fader .thumb { position: absolute; top: 2px; width: 14px; height: 20px; margin-left: -7px; border-radius: 4px; background: var(--text); border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--border2); }
+  .fader:hover .thumb, .fader.drag .thumb { background: #fff; box-shadow: 0 0 0 2px var(--accent); }
+  .fader.dim .fill { background: var(--muted); opacity: .5; }
+  .fader.dim .thumb { background: var(--muted); }
+  .readout { font: 700 18px var(--mono); min-width: 62px; text-align: right; }
+  .readout.dim { color: var(--muted); }
+
+  /* panes */
+  .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); min-height: 44px; flex-wrap: wrap; }
+  .pane-head h2 { margin: 0 4px 0 0; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; }
+
+  /* clip bin + editor */
+  #bin { grid-area: bin; }
+  .bin-body { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 4px 6px; padding: 8px; overflow-y: auto; align-content: start; min-height: 0; }
+  .clip { position: relative; display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 8px; align-items: center; height: 46px; padding: 3px 4px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; cursor: pointer; user-select: none; }
+  .clip:hover { border-color: var(--muted); }
+  .clip.sel { border-color: var(--accent); background: var(--accent-tint); }
+  .clip.cued { border-color: var(--cue); }
+  .clip.playing { border-color: var(--ok); }
+  .thumb { width: 64px; height: 36px; border-radius: 2px; display: block; }
+  .meta { min-width: 0; line-height: 1.3; }
+  .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  .s { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .clip.sel .s { color: var(--muted-on-tint); }
+  .r { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11px; }
+  .badge { font-weight: 700; color: var(--muted); }
+  .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+  .copytag { font-size: 10px; font-weight: 700; padding: 0 4px; border-radius: 3px; border: 1px solid var(--border2); color: var(--muted); margin-left: 5px; vertical-align: 1px; }
+  .chtag { font-size: 10px; font-weight: 800; padding: 0 5px; border-radius: 3px; }
+  .cued .chtag { background: var(--cue); color: #1d1600; }
+  .playing .chtag { background: var(--ok); color: #06140b; }
+  .spdbtn { font: 700 11px var(--mono); padding: 0 5px; border-radius: 3px; border: 1px solid var(--border2); background: var(--sunk); color: var(--text); line-height: 16px; }
+  .spdbtn:hover { border-color: var(--accent); }
+  .spdbtn.follow { border-style: dashed; color: var(--muted); }
+  #spmenu { position: fixed; z-index: 10; background: var(--panel2); border: 1px solid var(--border2); border-radius: 6px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px; }
+  #spmenu .t { flex-basis: 100%; font-size: 11px; color: var(--muted); padding: 0 2px 2px; }
+  #spmenu .b { height: 28px; min-width: 0; padding: 0 8px; }
+  .prog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--ok); }
+
+  .ins-head { display: flex; align-items: center; gap: 8px; }
+  .ins-head input { flex: 1; min-width: 0; background: var(--sunk); border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; font-weight: 700; font-size: 14px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > label, .flabel { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; display: flex; align-items: center; gap: 8px; }
+  .flabel .link { text-transform: none; letter-spacing: 0; }
+  .frow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  select, input[type=number] { background: var(--sunk); border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px; font-size: 12px; }
+  input[type=number] { width: 64px; font-family: var(--mono); }
+  .check { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; cursor: pointer; }
+  .used { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .used b { color: var(--text); font-weight: 600; }
+
+  /* IN/OUT editor */
+  .trim { display: flex; flex-direction: column; gap: 8px; }
+  .scope { font-size: 12px; padding: 7px 9px; border-radius: 5px; border: 1px solid var(--border2); background: var(--sunk); line-height: 1.45; }
+  .scope.shared { border-color: rgba(224,168,58,.55); }
+  .scope.shared .lead { color: var(--warn); font-weight: 700; }
+  .scope.own .lead { color: var(--ok); font-weight: 700; }
+  .scope .acts { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .rangebar { position: relative; height: 30px; background: var(--sunk); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; touch-action: none; user-select: none; }
+  .rangebar .sel { position: absolute; top: 0; bottom: 0; background: var(--accent-tint); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  .rangebar .h { position: absolute; top: -3px; bottom: -3px; width: 12px; margin-left: -6px; cursor: ew-resize; display: grid; place-items: center; }
+  .rangebar .h::after { content: ""; width: 4px; height: 18px; border-radius: 2px; background: var(--accent); }
+  .rangebar .h.drag::after, .rangebar .h:hover::after { background: #fff; }
+  .rangebar .ph { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ok); margin-left: -1px; pointer-events: none; }
+  .rangebar .lbl { position: absolute; bottom: 2px; font: 600 9px var(--mono); color: var(--muted); pointer-events: none; }
+  .points { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+  .pt { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+  .pt canvas { grid-row: span 2; width: 64px; height: 36px; border-radius: 2px; }
+  .pt .tc { font-size: 12px; font-weight: 600; }
+  .pt .ctl { display: flex; gap: 3px; }
+  .pt .ctl .ghost { white-space: nowrap; }
+  .len { font-size: 12px; color: var(--muted); }
+  .len b { color: var(--text); }
+
+  /* playlist */
+  #side { grid-area: side; }
+  .entries { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; min-height: 0; }
+  .entry, .join { flex: none; }
+  .entry { border: 1px solid var(--border); border-radius: 5px; background: var(--panel2); position: relative; overflow: hidden; }
+  .entry.open { border-color: var(--accent); }
+  .entry.playing { border-color: var(--ok); }
+  .entry.cued { border-color: var(--cue); }
+  .erow { display: grid; grid-template-columns: 18px 56px minmax(0, 1fr) auto 16px; gap: 8px; align-items: center; padding: 4px 8px 4px 6px; cursor: pointer; user-select: none; }
+  .erow .num { font: 700 12px var(--mono); color: var(--muted); text-align: right; }
+  .erow canvas { width: 56px; height: 32px; border-radius: 2px; }
+  .erow .r { visibility: visible !important; }
+  .spd { font: 700 11px var(--mono); padding: 0 4px; border-radius: 3px; }
+  .spd.own { background: var(--chip); border: 1px solid var(--border2); color: var(--text); }
+  .spd.follow { color: var(--muted); }
+  .chev { color: var(--muted); transition: transform .15s; }
+  .entry.open .chev { transform: rotate(90deg); color: var(--accent); }
+  .eprog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--ok); }
+  .edit { border-top: 1px solid var(--border); padding: 10px 10px 12px; display: flex; flex-direction: column; gap: 12px; background: var(--panel); }
+  .edit .acts { display: flex; gap: 6px; }
+
+  .join { display: flex; flex-direction: column; align-items: center; padding: 3px 0; }
+  .join .line { display: flex; align-items: center; gap: 6px; width: 100%; }
+  .join .line::before, .join .line::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .pill { border: 1px solid var(--border2); background: var(--sunk); border-radius: 999px; padding: 1px 10px; font: 700 11px var(--mono); color: var(--muted); }
+  .pill.mix { color: var(--cue); border-color: rgba(232,195,58,.5); }
+  .pill.open { border-color: var(--accent); color: var(--accent); }
+  .pill.ghost { opacity: .55; }
+  .joined { margin: 4px 0 2px; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--panel); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+  .joined .chips { display: flex; gap: 3px; }
+  .side-foot { display: flex; gap: 6px; align-items: center; padding: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .side-body { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; }
+  .empty { color: var(--muted); padding: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+</svg>
+<div id="stage">
+  <div id="top"></div>
+  <section id="ch"></section>
+  <section id="bin" class="pane"></section>
+  <section id="side" class="pane"></section>
+</div>
+<script>
+"use strict";
+// ------------------------------------------------------------------ model
+const FPS = 25;
+const tcToF = (s) => { const [h, m, x, f] = s.split(":").map(Number); return ((h * 60 + m) * 60 + x) * FPS + f; };
+const tc = (f) => { f = Math.max(0, Math.round(f)); const p = (n) => String(n).padStart(2, "0");
+  return `${p(Math.floor(f / (3600 * FPS)))}:${p(Math.floor(f / (60 * FPS)) % 60)}:${p(Math.floor(f / FPS) % 60)}:${p(f % FPS)}`; };
+const dur = (f) => { const s = Math.max(0, f) / FPS; const m = Math.floor(s / 60); return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`; };
+const pct = (v) => `${Math.round(v * 100)} %`;
+const icon = (n, fill) => `<svg class="i${fill ? " fill" : ""}"><use href="#i-${n}"/></svg>`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+const CAMS = { 1: "Main", 2: "Tight", 3: "Reverse", 4: "Goal L", 5: "Bench" };
+let seq = 10;
+const S = {
+  faderMax: (() => { try { return localStorage.getItem("lsm.faderMax") === "200" ? 200 : 100; } catch { return 100; } })(),
+  now: tcToF("19:42:10:00"),
+  clips: [
+    { id: "c1", name: "Goal 12'", cam: 2, in: tcToF("19:12:31:05"), out: tcToF("19:12:38:15"), speed: 0.5, colour: "#f5c518", tags: "goal", end: "freeze" },
+    { id: "c2", name: "Save 18'", cam: 1, in: tcToF("19:18:04:12"), out: tcToF("19:18:09:00"), speed: 0.33, colour: "#4dd0c8", tags: "save", end: "freeze" },
+    { id: "c3", name: "Foul 23'", cam: 3, in: tcToF("19:23:40:00"), out: tcToF("19:23:44:10"), speed: 0.5, colour: "#b38cff", tags: "foul", end: "freeze" },
+    { id: "c4", name: "Corner 27'", cam: 4, in: tcToF("19:27:02:00"), out: tcToF("19:27:09:00"), speed: 1, colour: "#ff9f43", tags: "set piece", end: "freeze" },
+    { id: "c5", name: "Celebration", cam: 2, in: tcToF("19:12:39:00"), out: tcToF("19:12:47:00"), speed: 0.75, colour: "#f5c518", tags: "goal", end: "freeze" },
+    { id: "c6", name: "Coach reaction", cam: 5, in: tcToF("19:31:15:00"), out: tcToF("19:31:19:12"), speed: 1, colour: "#8fb3d9", tags: "bench", end: "freeze" },
+  ],
+  playlists: [
+    { id: "p1", name: "Highlights 1st half", loop: false, entries: [
+      { id: "e1", clip: "c1", speed: null, end: "next", auto: true, tr: { kind: "cut", frames: 25 } },
+      { id: "e2", clip: "c2", speed: 0.5, end: "next", auto: true, tr: { kind: "mix", frames: 25 } },
+      { id: "e3", clip: "c3", speed: null, end: "next", auto: true, tr: { kind: "cut", frames: 25 } },
+      { id: "e4", clip: "c5", speed: null, end: "freeze", auto: true, tr: { kind: "mix", frames: 12 } },
+    ] },
+    { id: "p2", name: "Best saves", loop: true, entries: [{ id: "e9", clip: "c2", speed: null, end: "next", auto: true, tr: { kind: "cut", frames: 25 } }] },
+  ],
+  selected: "c2",
+  spmenu: null, // { kind: "clip" | "entry" | "all", id, x, y }
+  openEntry: "e2",
+  openJoin: null, // entry id whose transition is open
+  // The channel's shot: what it was cued with is copied, so edits only reach it at the next cue (or while cued).
+  // in/out are the channel's marks: a cue sets them to the clip's, IN and OUT move them, and the shot plays between them.
+  ch: { kind: "live", cam: 1, clip: null, entry: null, in: null, out: null, pos: 0, speed: 1, target: 1, state: "live", mix: null, onair: true },
+  toast: null,
+};
+const pl = () => S.playlists[0];
+const clip = (id) => S.clips.find((c) => c.id === id);
+const entry = (id) => pl().entries.find((e) => e.id === id);
+const entrySpeed = (e) => (e.speed ?? clip(e.clip).speed);
+const usage = (id) => {
+  const lists = S.playlists.filter((p) => p.entries.some((e) => e.clip === id)).map((p) => p.name);
+  return { lists, shared: lists.length > 1 || S.playlists.some((p) => p.entries.filter((e) => e.clip === id).length > 1) };
+};
+
+// ------------------------------------------------------------------ the channel
+function toast(text, warn) {
+  S.toast = { text, warn, t: performance.now() };
+  const el = document.querySelector(".toast");
+  if (el) { el.textContent = text; el.className = `toast show${warn ? " warn" : ""}`; }
+}
+function cueClip(id) {
+  const c = clip(id);
+  Object.assign(S.ch, { kind: "clip", cam: c.cam, clip: id, entry: null, in: c.in, out: c.out, pos: c.in, target: c.speed, speed: 0, state: "cued", mix: null });
+  render();
+}
+function cueEntry(id, play) {
+  const e = entry(id), c = clip(e.clip);
+  Object.assign(S.ch, { kind: "entry", cam: c.cam, clip: c.id, entry: id, in: c.in, out: c.out, pos: c.in, target: entrySpeed(e), speed: play ? entrySpeed(e) : 0, state: play ? "playing" : "cued" });
+  if (!play) S.ch.mix = null;
+  render();
+}
+function playPause() {
+  const ch = S.ch;
+  if (ch.state === "playing" || ch.state === "live") { if (ch.state === "live") Object.assign(ch, { kind: "free", pos: S.now }); ch.state = "paused"; ch.speed = 0; }
+  else if (ch.state === "ended") { ch.pos = ch.in ?? ch.pos; ch.state = "playing"; }
+  else ch.state = "playing";
+  render();
+}
+// Marks, scrub and clip: the normal LSM controls. On a cued clip or entry they edit what will be saved back.
+function mark(which) {
+  const ch = S.ch, f = Math.round(ch.state === "live" ? S.now : ch.pos);
+  if (which === "in") { if (ch.out != null && f >= ch.out) ch.out = null; ch.in = f; }
+  else if (ch.in != null && f <= ch.in) return toast("OUT must be after IN", true);
+  else ch.out = f;
+  toast(`${which.toUpperCase()} ${tc(f)}`);
+  render();
+}
+function scrubTo(f) {
+  const ch = S.ch;
+  if (ch.state === "live") Object.assign(ch, { kind: "free", clip: null, entry: null });
+  ch.pos = Math.max(0, Math.min(S.now, Math.round(f)));
+  ch.state = "paused";
+  ch.speed = 0; ch.mix = null;
+  render();
+}
+function gotoMark(which) { if (S.ch[which] == null) return toast(`No ${which.toUpperCase()} set`, true); scrubTo(S.ch[which]); }
+function createClip() {
+  const ch = S.ch;
+  if (ch.in == null || ch.out == null) return toast("Mark IN and OUT first", true);
+  const n = S.clips.filter((c) => /^Clip \d+$/.test(c.name)).length + 1;
+  const c = { id: `c${++seq}`, name: `Clip ${n}`, cam: ch.cam, in: ch.in, out: ch.out, speed: ch.state === "live" ? 1 : Math.max(0.01, ch.target), colour: "#8fb3d9", tags: "", end: "freeze" };
+  S.clips.unshift(c); S.selected = c.id;
+  toast(`${c.name} created`);
+  render();
+}
+// The marks of a cued clip or entry that differ from the stored clip.
+function marksChanged() {
+  const ch = S.ch, c = ch.clip && clip(ch.clip);
+  return c && (ch.kind === "clip" || ch.kind === "entry") && ch.in != null && ch.out != null && (ch.in !== c.in || ch.out !== c.out) ? c : null;
+}
+function updateClip() {
+  const c = marksChanged(); if (!c) return;
+  c.in = S.ch.in; c.out = S.ch.out;
+  const u = usage(c.id);
+  toast(`“${c.name}” updated${u.lists.length ? ` · also in ${u.lists.join(", ")}` : ""}`);
+  render();
+}
+function revertMarks() { const c = marksChanged(); if (!c) return; S.ch.in = c.in; S.ch.out = c.out; render(); }
+function goLive() { Object.assign(S.ch, { kind: "live", clip: null, entry: null, state: "live", target: 1, speed: 1, mix: null }); render(); }
+// The fader: the channel's speed now. On a cued, paused or live channel it also plays (as a lever does).
+function setChannelSpeed(v) {
+  const ch = S.ch;
+  ch.target = v;
+  if (ch.state === "live") { if (v < 0.999) Object.assign(ch, { kind: "free", pos: S.now, state: "playing", speed: 1 }); }
+  else if (v > 0 && (ch.state === "cued" || ch.state === "paused")) ch.state = "playing";
+  else if (v > 0 && ch.state === "ended") { ch.pos = ch.in; ch.state = "playing"; }
+}
+// §3.1: a cued shot takes an edit at once; a shot that plays or paused inside it keeps what it was cued with.
+function afterEdit(clipId) {
+  const ch = S.ch;
+  if (ch.clip !== clipId && !(ch.entry && entry(ch.entry)?.clip === clipId)) return;
+  if (ch.state === "cued") {
+    if (ch.kind === "entry") cueEntry(ch.entry, false); else cueClip(ch.clip);
+    toast("Cued shot updated");
+  } else if (ch.state === "playing" || ch.state === "paused") toast("Saved · applies at the next cue");
+}
+
+function nextOf(idx) {
+  const list = pl().entries;
+  return idx + 1 < list.length ? list[idx + 1] : pl().loop ? list[0] : null;
+}
+function tick() {
+  S.now += 1;
+  const ch = S.ch;
+  if (ch.state === "live") ch.pos = S.now;
+  else if (ch.state === "playing") {
+    ch.speed += Math.abs(ch.target - ch.speed) < 0.01 ? ch.target - ch.speed : (ch.target - ch.speed) / 3; // the 3-frame ramp
+    ch.pos += ch.speed;
+    if (ch.kind === "free" && ch.pos >= S.now) goLive();
+    if (ch.kind === "entry") {
+      const list = pl().entries, idx = list.findIndex((e) => e.id === ch.entry), e = list[idx], next = e && nextOf(idx);
+      const chains = e && e.end === "next" && e.auto && next;
+      const L = chains && next.tr.kind === "mix" ? next.tr.frames : 0;
+      if (chains && L && !ch.mix && (ch.out - ch.pos) / Math.max(ch.speed, 0.01) <= L) {
+        ch.mix = { clip: ch.clip, pos: ch.pos, speed: ch.speed, out: ch.out, k: 0, n: L };
+        cueEntry(next.id, true);
+      } else if (ch.out != null && ch.pos >= ch.out) {
+        if (chains) cueEntry(next.id, true);
+        else if (e && e.end === "loop") ch.pos = ch.in;
+        else { ch.pos = ch.out; ch.state = "ended"; ch.speed = 0; render(); }
+      }
+    } else if (ch.kind === "clip" && ch.out != null && ch.pos >= ch.out) {
+      if (clip(ch.clip).end === "loop") ch.pos = ch.in; else { ch.pos = ch.out; ch.state = "ended"; ch.speed = 0; render(); }
+    }
+  }
+  if (ch.mix) { ch.mix.k++; ch.mix.pos = Math.min(ch.mix.out, ch.mix.pos + ch.mix.speed); if (ch.mix.k >= ch.mix.n) ch.mix = null; }
+  if (S.toast && performance.now() - S.toast.t > 2200) { S.toast = null; const el = document.querySelector(".toast"); if (el) el.className = "toast"; }
+  frame();
+}
+
+// ------------------------------------------------------------------ fake pictures
+function paint(ctx, w, h, cam, f, colour, alpha = 1) {
+  ctx.globalAlpha = alpha;
+  const hue = { 1: 140, 2: 120, 3: 95, 4: 160, 5: 200 }[cam] || 130;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, `hsl(${hue} 30% 22%)`); g.addColorStop(1, `hsl(${hue} 45% 12%)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.lineWidth = Math.max(1, w / 320);
+  ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h); ctx.arc(w / 2, h / 2, h / 5, 0, 7); ctx.stroke();
+  // a player that moves with the frame number, so speed and frame steps are visible
+  const t = f / FPS, x = ((Math.sin(t * 0.9 + cam) + 1) / 2) * 0.8 * w + 0.1 * w, y = h * (0.55 + 0.18 * Math.sin(t * 1.7 + cam * 2));
+  ctx.fillStyle = colour || "#fff"; ctx.beginPath(); ctx.arc(x, y, h / 14, 0, 7); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x + Math.cos(t * 6) * h / 7, y + h / 10, h / 40, 0, 7); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.font = `800 ${h / 2.4}px system-ui`; ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+  ctx.fillText(cam, w - w / 30, h);
+  ctx.globalAlpha = 1;
+}
+function thumb(canvas, cam, f, colour) {
+  const r = window.devicePixelRatio || 1, w = canvas.clientWidth || 64, h = canvas.clientHeight || 36;
+  canvas.width = w * r; canvas.height = h * r;
+  paint(canvas.getContext("2d"), w * r, h * r, cam, f, colour);
+}
+
+// ------------------------------------------------------------------ the fader
+// 0–100 % is linear. With 0–200 %, 0–100 takes two thirds of the travel (slow motion is where precision counts).
+const TICKS = [0.25, 0.33, 0.5, 0.75, 1];
+const toX = (v) => (S.faderMax === 100 ? v : v <= 1 ? (v * 2) / 3 : 2 / 3 + ((v - 1) / 1) / 3);
+const fromX = (x) => (S.faderMax === 100 ? x : x <= 2 / 3 ? (x * 3) / 2 : 1 + (x - 2 / 3) * 3);
+const maxV = () => S.faderMax / 100;
+function faderHtml(key, v, { min = 0, dim = false } = {}) {
+  const ticks = [...TICKS, ...(S.faderMax === 200 ? [1.5, 2] : [])];
+  return `<div class="fader${dim ? " dim" : ""}" data-fader="${key}" data-min="${min}" title="Drag · wheel ±1 % (Shift ±10 %) · Alt: no snapping">
+    <div class="track"></div><div class="fill" style="width:${toX(v) / 1 * 100}%"></div>
+    ${ticks.map((t) => `<div class="tick${t === 1 ? " hundred" : ""}" style="left:${toX(t) * 100}%"><span>${Math.round(t * 100)}</span></div>`).join("")}
+    <div class="thumb" style="left:${toX(v) * 100}%"></div></div>`;
+}
+const snap = (v, alt) => { if (alt) return v; for (const t of [...TICKS, 1.5, 2]) if (Math.abs(v - t) <= 0.02) return t; return v; };
+function faderSet(key, v, commit) {
+  v = Math.round(v * 100) / 100;
+  if (key === "ch") setChannelSpeed(v);
+  else if (key.startsWith("clip:")) { const c = clip(key.slice(5)); c.speed = v; if (commit) afterEdit(c.id); }
+  else if (key.startsWith("entry:")) { const e = entry(key.slice(6)); e.speed = v; if (commit) afterEdit(e.clip); }
+  render();
+}
+let drag = null;
+document.addEventListener("pointerdown", (ev) => {
+  const f = ev.target.closest(".fader");
+  if (!f) return;
+  ev.preventDefault();
+  const d = (drag = { key: f.dataset.fader, min: Number(f.dataset.min), rect: f.getBoundingClientRect() });
+  f.classList.add("drag");
+  const move = (e) => {
+    const x = Math.min(1, Math.max(0, (e.clientX - d.rect.left) / d.rect.width));
+    faderSet(d.key, Math.max(d.min, snap(Math.min(maxV(), fromX(x)), e.altKey)), false);
+  };
+  move(ev);
+  const up = (e) => { document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); move(e); drag = null; faderSet(d.key, currentOf(d.key), true); };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+});
+const currentOf = (key) => key === "ch" ? S.ch.target : key.startsWith("clip:") ? clip(key.slice(5)).speed : entrySpeed(entry(key.slice(6)));
+let wheelTimer;
+document.addEventListener("wheel", (ev) => {
+  const f = ev.target.closest(".fader");
+  if (!f) return;
+  ev.preventDefault();
+  const key = f.dataset.fader, step = (ev.shiftKey ? 0.1 : 0.01) * ((ev.deltaY || ev.deltaX) < 0 ? 1 : -1);
+  faderSet(key, Math.max(Number(f.dataset.min), Math.min(maxV(), currentOf(key) + step)), false);
+  clearTimeout(wheelTimer); wheelTimer = setTimeout(() => faderSet(key, currentOf(key), true), 400);
+}, { passive: false });
+
+// ------------------------------------------------------------------ a clip's IN/OUT, read only (edited on the channel)
+function rangeHtml(c, entryId) {
+  const own = entryId && c.forEntry === entryId;
+  const onA = S.ch.clip === c.id && (entryId ? S.ch.entry === entryId : S.ch.kind === "clip");
+  return `<div class="frow"><span class="tc">IN ${tc(c.in)}</span><span class="tc">OUT ${tc(c.out)}</span><span class="muted tc">${dur(c.out - c.in)}</span></div>
+    <span class="hint">${onA ? "On A: set IN and OUT there, then Update clip." : "Cue it on A and set IN and OUT there, as for any shot."}${own ? ` This entry's own copy${clip(c.copyOf) ? ` of “${esc(clip(c.copyOf).name)}”` : " (the original is deleted)"}.` : ""}</span>`;
+}
+// The timeline under the monitor: around the loaded clip (its stored range dashed), else the last two minutes.
+function timelineHtml() {
+  const ch = S.ch, c = ch.clip && ch.kind !== "live" && ch.kind !== "free" ? clip(ch.clip) : null;
+  let lo, hi;
+  if (c) { lo = Math.min(c.in, ch.in ?? c.in) - 10 * FPS; hi = Math.min(S.now, Math.max(c.out, ch.out ?? c.out) + 10 * FPS); }
+  else { hi = S.now + 2 * FPS; lo = hi - 120 * FPS; }
+  S.tl = { lo, hi };
+  const at = (f) => Math.max(0, Math.min(100, ((f - lo) / (hi - lo)) * 100));
+  return `<div class="tl" data-tl title="Click or drag to scrub">
+    ${c ? `<div class="orig" style="left:${at(c.in)}%;width:${at(c.out) - at(c.in)}%" title="The clip as stored"></div>` : ""}
+    ${ch.in != null && ch.out != null ? `<div class="mk" style="left:${at(ch.in)}%;width:${at(ch.out) - at(ch.in)}%"></div>` : ""}
+    ${ch.in != null && ch.in >= lo ? `<div class="mi" style="left:${at(ch.in)}%"></div>` : ""}${ch.out != null && ch.out >= lo ? `<div class="mo" style="left:${at(ch.out)}%"></div>` : ""}
+    <div class="ph" data-tlph style="left:${at(ch.pos)}%"></div>
+    <span class="lbl" style="left:4px">${tc(lo)}</span><span class="lbl" style="right:4px">${tc(hi)}</span></div>`;
+}
+document.addEventListener("pointerdown", (ev) => {
+  const bar = ev.target.closest("[data-tl]");
+  if (!bar) return;
+  ev.preventDefault();
+  const rect = bar.getBoundingClientRect(), { lo, hi } = S.tl;
+  const move = (e) => scrubTo(lo + Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) * (hi - lo));
+  move(ev);
+  const up = () => { document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+});
+document.addEventListener("wheel", (ev) => {
+  if (!ev.target.closest(".mon")) return;
+  ev.preventDefault();
+  scrubTo(S.ch.pos + ((ev.deltaY || ev.deltaX) > 0 ? 1 : -1) * (ev.shiftKey ? FPS : 1));
+}, { passive: false });
+
+// ------------------------------------------------------------------ copy a clip for one entry
+function copyFor(entryId) {
+  const e = entry(entryId), c = clip(e.clip);
+  const base = c.copyOf ? clip(c.copyOf)?.name || c.name : c.name;
+  let name = `${base} (${pl().name})`;
+  for (let n = 2; S.clips.some((x) => x.name === name); n++) name = `${base} (${pl().name} ${n})`;
+  const copy = { ...c, id: `c${++seq}`, name, copyOf: c.copyOf || c.id, forEntry: entryId };
+  // On A with changed marks: the copy takes the marks, the original stays as it is.
+  if (S.ch.entry === entryId && S.ch.in != null && S.ch.out != null) { copy.in = S.ch.in; copy.out = S.ch.out; }
+  S.clips.splice(S.clips.indexOf(c) + 1, 0, copy);
+  e.clip = copy.id;
+  toast(`“${copy.name}” made · this entry now plays the copy`);
+  if (S.ch.entry === entryId) S.ch.clip = copy.id;
+  render();
+}
+// ------------------------------------------------------------------ render
+const END = ["freeze", "black", "loop", "next", "return-to-live"];
+function render() {
+  if (render.q) return;
+  render.q = requestAnimationFrame(() => { render.q = 0; draw(); });
+}
+function draw() {
+  const ch = S.ch, c = ch.clip && clip(ch.clip), e = ch.entry && entry(ch.entry);
+  const list = pl().entries, idx = e ? list.indexOf(e) : -1;
+
+  document.getElementById("top").innerHTML = `
+    <h1>Speed fader · clip and playlist editing</h1><span class="note">Prototype · mock data · mouse only for speed</span><span class="spacer"></span>
+    <span class="hint">Fader range</span><span class="seg"><button class="${S.faderMax === 100 ? "on" : ""}" data-act="range" data-v="100">0–100 %</button><button class="${S.faderMax === 200 ? "on" : ""}" data-act="range" data-v="200">0–200 %</button></span>`;
+
+  // channel
+  const playing = ch.state === "playing";
+  const what = e ? `<b>${esc(pl().name)}</b> ${idx + 1}/${list.length} · ${esc(c.name)}` : c ? `<b>${esc(c.name)}</b>` : ch.state === "live" ? "following live" : `${dur(S.now - ch.pos)} behind live`;
+  const stateWord = { live: "", cued: "CUED", playing: "", paused: "PAUSED", ended: "END" }[ch.state];
+  let save = "";
+  if (c && Math.abs(ch.target - (e ? entrySpeed(e) : c.speed)) > 0.004 && ch.target > 0) {
+    save = `<button class="b sm save" data-act="save-speed" title="${e ? "Store the fader's speed as this entry's own speed" : "Store the fader's speed as the clip's speed"}">Save ${pct(ch.target)} to ${e ? "entry" : "clip"}</button>`;
+  }
+  const chEl = document.getElementById("ch");
+  chEl.className = ch.onair ? "onair" : "";
+  chEl.innerHTML = `
+    <div class="ch-head"><span class="letter">A</span><span class="ch-name">LSM A</span><span class="what">${what}</span></div>
+    <div class="mon"><canvas id="mon" width="1280" height="720"></canvas>
+      <div class="angle">${c ? c.cam : 1} · ${CAMS[c ? c.cam : 1]}</div>
+      <div class="countdown tc" data-cd></div><div class="mixbadge" data-mix hidden></div>
+      <div class="osd"><span class="big tc" data-tc></span><span class="speed tc" data-spd></span></div>
+      <div class="toast${S.toast ? " show" : ""}${S.toast?.warn ? " warn" : ""}">${S.toast ? esc(S.toast.text) : ""}</div>
+    </div>
+    <div class="pb">
+      ${timelineHtml()}
+      <div class="btns">
+        <button class="b" data-act="mark" data-v="in" title="Mark IN (I)">IN <kbd>I</kbd></button>
+        <button class="b" data-act="mark" data-v="out" title="Mark OUT (O)">OUT <kbd>O</kbd></button>
+        <button class="b" data-act="goto" data-v="in" title="Go to IN ([)">[</button>
+        <button class="b" data-act="goto" data-v="out" title="Go to OUT (])">]</button>
+        <button class="b" data-act="create" title="New clip from IN to OUT (C)">+ Clip <kbd>C</kbd></button>
+      </div>
+      <div class="btns">
+        <button class="b play${playing ? " on" : ""}" data-act="play" aria-label="${playing ? "Pause" : "Play"}">${icon(playing ? "pause" : "play", true)}</button>
+        <button class="b live${ch.state === "live" ? " on" : ""}" data-act="live">LIVE</button>
+      </div>
+      <div class="fwrap">${faderHtml("ch", ch.state === "live" ? 1 : Math.min(ch.target, maxV()), { dim: ch.state === "live" })}
+        <span class="readout${ch.state === "live" ? " dim" : ""}" data-readout>${pct(ch.state === "live" ? 1 : ch.target)}</span></div>
+      <div class="presets">${[0.25, 0.33, 0.5, 0.75, 1].map((s) => `<button class="b${ch.state !== "live" && Math.abs(ch.target - s) < 0.005 ? " on" : ""}" data-act="preset" data-v="${s}">${Math.round(s * 100)}</button>`).join("")}</div>
+      ${save}
+      ${stateWord ? `<span class="hint">${stateWord}</span>` : ""}
+      <div class="marks">IN <b class="tc">${ch.in != null ? tc(ch.in) : "--:--:--:--"}</b> OUT <b class="tc">${ch.out != null ? tc(ch.out) : "--:--:--:--"}</b>
+        ${ch.in != null && ch.out != null ? `· <b class="tc">${dur(ch.out - ch.in)}</b>` : ""}</div>
+      ${marksBarHtml()}
+    </div>`;
+
+  // clip bin
+  document.getElementById("bin").innerHTML = `
+    <div class="pane-head"><h2>Clips</h2><span class="hint">Click selects · double-click cues on A · click a speed for presets</span></div>
+    <div class="bin-body">
+      <div class="clips">${S.clips.map((x) => {
+        const on = ch.kind === "clip" && ch.clip === x.id ? ch : null;
+        const cls = [S.selected === x.id && "sel", on && (on.state === "playing" ? "playing" : "cued")].filter(Boolean).join(" ");
+        const prog = on ? Math.max(0, Math.min(100, ((on.pos - on.in) / (on.out - on.in)) * 100)) : 0;
+        return `<div class="clip ${cls}" data-clip="${x.id}">
+          <canvas class="thumb" data-thumb="${x.cam}:${x.in}:${x.colour}"></canvas>
+          <div class="meta"><div class="n">${on ? `<span class="chtag">A ${on.state === "playing" ? "PLAY" : "CUED"}</span> ` : ""}<span class="sw" style="background:${x.colour}"></span>${esc(x.name)}${x.copyOf ? `<span class="copytag">COPY</span>` : ""}</div>
+            <div class="s">${x.cam} ${CAMS[x.cam]} · ${esc(x.tags)}</div></div>
+          <div class="r"><span class="tc">${dur((x.out - x.in) / x.speed)}</span><button class="spdbtn" data-act="spmenu" data-kind="clip" data-id="${x.id}" title="Clip speed: click for presets">${pct(x.speed)}</button></div>
+          <span class="prog" data-prog="${x.id}" style="width:${prog}%"></span></div>`;
+      }).join("")}</div>
+    </div>`;
+
+  // playlist
+  document.getElementById("side").innerHTML = `
+    <div class="pane-head"><h2>${esc(pl().name)}</h2><span class="hint">${list.length} clips · ${dur(list.reduce((a, x) => a + (clip(x.clip).out - clip(x.clip).in) / entrySpeed(x), 0))}</span><span class="spacer"></span>
+      <button class="b sm" data-act="spmenu" data-kind="all" title="Set every entry's speed (EVS: Edit all)">All speeds</button>
+      <button class="b sm${pl().loop ? " on" : ""}" data-act="loop">Loop</button></div>
+    <div class="side-body">
+      <div class="entries">${list.map((x, i) => (i > 0 || pl().loop ? joinHtml(x, i) : "") + entryHtml(x, i)).join("")}</div>
+      <div class="side-foot"><button class="b sm" data-act="add" ${S.selected ? "" : "disabled"}>+ Add selected clip</button><span class="spacer"></span>
+        <button class="b sm" data-act="cue-pl">Cue on A</button></div>
+    </div>`;
+
+  spmenuDraw();
+  document.querySelectorAll("canvas[data-thumb]").forEach((cv) => { const [cam, f, col] = cv.dataset.thumb.split(":"); thumb(cv, Number(cam), Number(f), col); });
+  frame();
+}
+function marksBarHtml() {
+  const c = marksChanged();
+  if (!c) return "";
+  const ch = S.ch, d = (a, b) => (a === b ? "same" : `${a > b ? "+" : "−"}${dur(Math.abs(a - b))}`);
+  const u = usage(c.id), elsewhere = ch.kind === "entry" ? (u.shared ? u.lists : []) : u.lists;
+  return `<div class="marksbar"><span>IN/OUT differ from <b>${esc(c.name)}</b>: IN ${d(ch.in, c.in)} · OUT ${d(ch.out, c.out)}</span>
+    <button class="b sm on" data-act="update-clip">Update clip</button>
+    ${ch.kind === "entry" && c.forEntry !== ch.entry ? `<button class="b sm" data-act="copy-entry" data-id="${ch.entry}">${icon("copy")}Copy for this entry</button>` : ""}
+    <button class="b sm ghost" data-act="revert">Revert</button>
+    ${elsewhere.length ? `<span class="warn">Update also changes it in ${elsewhere.map(esc).join(", ")}</span>` : ""}</div>`;
+}
+// Speed presets for a clip, an entry or all entries. Finer speeds: the fader, then Save (the EVS lever and ENTER).
+function spmenuDraw() {
+  let el = document.getElementById("spmenu");
+  const m = S.spmenu;
+  if (!m) return el?.remove();
+  if (!el) { el = document.createElement("div"); el.id = "spmenu"; document.body.append(el); }
+  const presets = [0.25, 0.33, 0.5, 0.75, 1, ...(S.faderMax === 200 ? [1.5, 2] : [])];
+  const cur = m.kind === "clip" ? clip(m.id).speed : m.kind === "entry" ? entry(m.id).speed : null;
+  const title = m.kind === "clip" ? `Speed of “${esc(clip(m.id).name)}”` : m.kind === "entry" ? "Speed of this entry" : `Speed of every entry in ${esc(pl().name)}`;
+  el.innerHTML = `<span class="t">${title}</span>
+    ${m.kind !== "clip" ? `<button class="b${m.kind === "entry" && cur == null ? " on" : ""}" data-act="spset" data-v="clip" title="Follow the clip's speed">${icon("link")} Clip${m.kind === "entry" ? ` ${pct(clip(entry(m.id).clip).speed)}` : ""}</button>` : ""}
+    ${presets.map((v) => `<button class="b${cur != null && Math.abs(cur - v) < 0.005 ? " on" : ""}" data-act="spset" data-v="${v}">${Math.round(v * 100)}</button>`).join("")}
+    <span class="t">Other speeds: play it on A, set the fader, Save.</span>`;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, m.x - w + 20))}px`;
+  el.style.top = `${m.y + h + 30 > innerHeight ? m.y - h - 6 : m.y + 24}px`;
+}
+function spset(v) {
+  const m = S.spmenu; S.spmenu = null;
+  const val = v === "clip" ? null : Number(v);
+  if (m.kind === "clip") { clip(m.id).speed = val; afterEdit(m.id); toast(`${clip(m.id).name}: ${pct(val)}`); }
+  else if (m.kind === "entry") { const e = entry(m.id); e.speed = val; afterEdit(e.clip); }
+  else { pl().entries.forEach((e) => (e.speed = val)); toast(val == null ? "Every entry follows its clip's speed" : `Every entry at ${pct(val)}`); }
+  render();
+}
+function joinHtml(x, i) {
+  const open = S.openJoin === x.id, t = x.tr;
+  const label = t.kind === "mix" ? `Mix ${t.frames}` : "Cut";
+  const title = i === 0 ? "Into the first entry when the playlist loops" : `Into entry ${i + 1}`;
+  return `<div class="join"><div class="line"><button class="pill${t.kind === "mix" ? " mix" : ""}${open ? " open" : ""}${i === 0 ? " ghost" : ""}" data-act="join" data-id="${x.id}" title="${title}">${label}</button></div>
+    ${open ? `<div class="joined">
+      <span class="seg"><button class="${t.kind === "cut" ? "on" : ""}" data-act="tr-kind" data-id="${x.id}" data-v="cut">Cut</button><button class="${t.kind === "mix" ? "on" : ""}" data-act="tr-kind" data-id="${x.id}" data-v="mix">Mix</button></span>
+      ${t.kind === "mix" ? `<span class="chips">${[12, 25, 50].map((n) => `<button class="b sm${t.frames === n ? " on" : ""}" data-act="tr-frames" data-id="${x.id}" data-v="${n}">${n}</button>`).join("")}</span>
+        <input type="number" min="1" max="250" value="${t.frames}" data-act="tr-custom" data-id="${x.id}" aria-label="Mix length in frames" /><span class="hint">frames</span>` : `<span class="hint">Hard cut, 2-frame audio crossfade</span>`}
+    </div>` : ""}</div>`;
+}
+function entryHtml(x, i) {
+  const c = clip(x.clip), ch = S.ch, open = S.openEntry === x.id;
+  const on = ch.kind === "entry" && ch.entry === x.id;
+  const list = pl().entries, curIdx = list.findIndex((e) => e.id === ch.entry);
+  const isNext = ch.kind === "entry" && ch.state === "playing" && nextOf(curIdx)?.id === x.id;
+  const cls = [open && "open", on && (ch.state === "playing" ? "playing" : "cued")].filter(Boolean).join(" ");
+  const sp = entrySpeed(x);
+  const tag = on ? `<span class="chtag" style="background:${ch.state === "playing" ? "var(--ok)" : "var(--cue)"};color:#111">${ch.state === "playing" ? "PLAY" : ch.state === "ended" ? "END" : "CUED"}</span>` : isNext ? `<span class="badge">NEXT</span>` : "";
+  const prog = on ? Math.max(0, Math.min(100, ((ch.pos - ch.in) / (ch.out - ch.in)) * 100)) : 0;
+  return `<div class="entry ${cls}">
+    <div class="erow" data-act="open" data-id="${x.id}">
+      <span class="num">${i + 1}</span><canvas data-thumb="${c.cam}:${c.in}:${c.colour}"></canvas>
+      <div class="meta"><div class="n"><span class="sw" style="background:${c.colour}"></span>${esc(c.name)}</div>
+        <div class="s">${c.cam} ${CAMS[c.cam]} · ${x.end}${x.auto ? "" : " · waits"}</div></div>
+      <div class="r"><span class="tc">${dur((c.out - c.in) / sp)}</span>
+        <span>${tag} <button class="spdbtn${x.speed == null ? " follow" : ""}" data-act="spmenu" data-kind="entry" data-id="${x.id}" title="${x.speed == null ? "Follows the clip's speed" : "The entry's own speed"}: click for presets">${x.speed == null ? icon("link") + " " : ""}${pct(sp)}</button></span></div>
+      <span class="chev">${icon("chev")}</span>
+    </div>
+    <span class="eprog" data-eprog="${x.id}" style="width:${prog}%"></span>
+    ${open ? `<div class="edit">
+      <div class="field"><span class="flabel">IN / OUT</span>${rangeHtml(c, x.id)}</div>
+      <div class="frow"><span class="flabel">End</span><select data-act="end" data-id="${x.id}">${END.map((v) => `<option${v === x.end ? " selected" : ""}>${v}</option>`).join("")}</select>
+        <label class="check"><input type="checkbox" data-act="auto" data-id="${x.id}"${x.auto ? " checked" : ""} /> Auto-advance</label></div>
+      <div class="acts"><button class="b sm" data-act="cue-entry" data-id="${x.id}">Cue on A</button>
+        ${c.forEntry === x.id ? "" : `<button class="b sm" data-act="copy-entry" data-id="${x.id}" title="Give this entry its own copy of the clip">${icon("copy")}Make a copy</button>`}
+        <span class="spacer"></span><button class="b sm ghost" data-act="remove" data-id="${x.id}">Remove</button></div>
+    </div>` : ""}
+  </div>`;
+}
+
+// per-frame updates (no re-render)
+function frame() {
+  const ch = S.ch, c = ch.clip && clip(ch.clip);
+  const cv = document.getElementById("mon");
+  if (cv) {
+    const ctx = cv.getContext("2d");
+    const cam = c ? c.cam : 1;
+    if (ch.mix) {
+      const a = (ch.mix.k + 1) / (ch.mix.n + 1), mc = clip(ch.mix.clip);
+      paint(ctx, cv.width, cv.height, mc.cam, ch.mix.pos, mc.colour);
+      paint(ctx, cv.width, cv.height, cam, ch.pos, c.colour, a);
+    } else paint(ctx, cv.width, cv.height, cam, ch.pos, c ? c.colour : "#fff");
+    if (ch.state === "ended" && ch.kind !== "live" && (ch.entry ? entry(ch.entry)?.end : c?.end) === "black") { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height); }
+  }
+  const q = (s) => document.querySelector(s);
+  if (q("[data-tc]")) q("[data-tc]").textContent = tc(ch.pos);
+  if (q("[data-spd]")) q("[data-spd]").textContent = ch.state === "playing" ? pct(ch.speed) : "";
+  const cd = q("[data-cd]");
+  if (cd) {
+    const has = c && ch.kind !== "live" && ch.kind !== "free";
+    cd.hidden = !has;
+    if (has) { const rem = (ch.out - ch.pos) / Math.max(ch.target, 0.01); cd.textContent = `−${dur(rem)}`; cd.classList.toggle("red", ch.state === "playing" && rem < 5 * FPS); }
+  }
+  const mx = q("[data-mix]");
+  if (mx) { mx.hidden = !ch.mix; if (ch.mix) mx.textContent = `MIX ${ch.mix.k + 1}/${ch.mix.n}`; }
+  const p = c && ch.kind !== "live" ? Math.max(0, Math.min(100, ((ch.pos - ch.in) / (ch.out - ch.in || 1)) * 100)) : 0;
+  document.querySelectorAll("[data-prog],[data-eprog]").forEach((el) => {
+    const mine = el.dataset.prog ? ch.kind === "clip" && el.dataset.prog === ch.clip : ch.kind === "entry" && el.dataset.eprog === ch.entry;
+    el.style.width = `${mine ? p : 0}%`;
+  });
+  const tlph = q("[data-tlph]");
+  if (tlph && S.tl) tlph.style.left = `${Math.max(0, Math.min(100, ((ch.pos - S.tl.lo) / (S.tl.hi - S.tl.lo)) * 100))}%`;
+  const sig = `${ch.kind}|${ch.entry}|${ch.clip}|${ch.state}`;
+  if (sig !== frame.sig) { frame.sig = sig; if (!drag) render(); }
+}
+
+// ------------------------------------------------------------------ actions
+document.addEventListener("click", (ev) => {
+  const t = ev.target.closest("[data-act]");
+  const card = ev.target.closest("[data-clip]");
+  if (S.spmenu && !ev.target.closest("#spmenu") && t?.dataset.act !== "spmenu") { S.spmenu = null; render(); if (!t) return; }
+  if (!t && card) { S.selected = card.dataset.clip; return render(); }
+  if (!t) return;
+  const id = t.dataset.id, a = t.dataset.act;
+  if (t.tagName === "INPUT" || t.tagName === "SELECT") return;
+  const e = id && entry(id);
+  switch (a) {
+    case "range": S.faderMax = Number(t.dataset.v); try { localStorage.setItem("lsm.faderMax", String(S.faderMax)); } catch {} break;
+    case "play": playPause(); break;
+    case "live": goLive(); break;
+    case "preset": setChannelSpeed(Number(t.dataset.v)); break;
+    case "save-speed": {
+      const ch = S.ch;
+      if (ch.entry) { entry(ch.entry).speed = ch.target; toast(`Entry speed ${pct(ch.target)} saved`); }
+      else { clip(ch.clip).speed = ch.target; toast(`Clip speed ${pct(ch.target)} saved`); }
+      break;
+    }
+    case "cue-clip": cueClip(id); break;
+    case "spmenu": {
+      const r = t.getBoundingClientRect(), same = S.spmenu && S.spmenu.kind === t.dataset.kind && S.spmenu.id === id;
+      S.spmenu = same ? null : { kind: t.dataset.kind, id, x: r.right, y: r.top };
+      break;
+    }
+    case "spset": spset(t.dataset.v); break;
+    case "open": S.openEntry = S.openEntry === id ? null : id; S.openJoin = null; break;
+    case "join": S.openJoin = S.openJoin === id ? null : id; break;
+    case "tr-kind": e.tr.kind = t.dataset.v; break;
+    case "tr-frames": e.tr.frames = Number(t.dataset.v); break;
+    case "follow": e.speed = null; afterEdit(e.clip); break;
+    case "copy-entry": copyFor(id); break;
+    case "cue-entry": cueEntry(id, false); break;
+    case "cue-pl": cueEntry(pl().entries[0].id, false); break;
+    case "remove": pl().entries.splice(pl().entries.indexOf(e), 1); break;
+    case "loop": pl().loop = !pl().loop; break;
+    case "add": pl().entries.push({ id: `e${++seq}`, clip: S.selected, speed: null, end: "next", auto: true, tr: { kind: "cut", frames: 25 } }); toast(`${clip(S.selected).name} added`); break;
+    case "mark": mark(t.dataset.v); break;
+    case "goto": gotoMark(t.dataset.v); break;
+    case "create": createClip(); break;
+    case "update-clip": updateClip(); break;
+    case "revert": revertMarks(); break;
+  }
+  render();
+});
+document.addEventListener("dblclick", (ev) => {
+  const card = ev.target.closest("[data-clip]");
+  if (card && !ev.target.closest("[data-act]")) cueClip(card.dataset.clip);
+});
+document.addEventListener("change", (ev) => {
+  const t = ev.target, id = t.dataset.id;
+  switch (t.dataset.act) {
+    case "end": entry(id).end = t.value; break;
+    case "auto": entry(id).auto = t.checked; break;
+    case "tr-custom": entry(id).tr.frames = Math.max(1, Math.min(250, Math.round(Number(t.value) || 25))); break;
+    default: return;
+  }
+  render();
+});
+// The channel's usual keys (no speed keys: the fader is mouse only).
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { S.spmenu = null; S.openJoin = null; S.openEntry = null; return render(); }
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const k = ev.key.toLowerCase();
+  if (k === "i") mark("in");
+  else if (k === "o") mark("out");
+  else if (k === "[") gotoMark("in");
+  else if (k === "]") gotoMark("out");
+  else if (k === "c") createClip();
+  else if (k === "l") goLive();
+  else if (k === " ") { ev.preventDefault(); playPause(); }
+  else if (k === "arrowleft" || k === "arrowright") { ev.preventDefault(); scrubTo(S.ch.pos + (k === "arrowleft" ? -1 : 1) * (ev.shiftKey ? FPS : 1)); }
+});
+
+draw();
+setInterval(tick, 1000 / FPS);
+</script>
+</body>
+</html>

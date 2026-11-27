@@ -32,6 +32,7 @@ src/mxl           readers and writers when libmxl is found
 src/ops           HTTP, WebSocket, Prometheus text, preview plan and widgets, H.264 publisher, MediaMTX child
 src/app           recorder + playout engine
 web/              Vue 3 UI: one component per tab in web/src/components, shared state in store.js
+operator-ui/      Vue 3 + TypeScript operator screen at /operator (SPECIFICATION.md §8.2a), state in src/lib/store.ts
 ```
 
 `replay-core` is what the unit tests link. `mxl-replay` is the process.
